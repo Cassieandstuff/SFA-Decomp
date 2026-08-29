@@ -48,10 +48,18 @@ int     fileLoadToBuffer(int id, void* buffer);
 int     fileLoadToBufferOffset(int id, void* dst, int offset, int size);
 int32_t fileGetSize(int id);
 
-// Host control.
-int  dvd_shim_init(const char* discRoot);   // extracted-disc directory; loads filetable.txt if present
+// Host control. discRoot may be an extracted-disc directory OR a GameCube ISO/GCM
+// image file - dvd_shim_init auto-detects and, for an image, parses the disc FST
+// so DVDOpen/fileLoad read files straight out of the ISO.
+int  dvd_shim_init(const char* discRoot);
 void dvd_shim_shutdown(void);
 int  dvd_shim_setName(int id, const char* relPath); // register/override an id -> path mapping
+
+// Disc introspection (populated when an ISO/GCM is mounted).
+int         dvd_shim_isIso(void);
+const char* dvd_shim_gameCode(void);          // 6-char disc game code, e.g. "GSAE01"
+int         dvd_shim_fileCount(void);          // number of files in the FST
+const char* dvd_shim_fileName(int idx, int* outSize); // FST entry idx -> path (+ size)
 
 #ifdef __cplusplus
 }

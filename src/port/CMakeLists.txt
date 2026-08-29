@@ -86,6 +86,10 @@ add_executable(dvd_smoketest src/tools/dvd_smoketest.c)
 target_include_directories(dvd_smoketest PRIVATE ${RHI_INCLUDE})
 target_link_libraries(dvd_smoketest PRIVATE stairfax_dvd)
 
+add_executable(disc_ls src/tools/disc_ls.c)
+target_include_directories(disc_ls PRIVATE ${RHI_INCLUDE})
+target_link_libraries(disc_ls PRIVATE stairfax_dvd)
+
 if(MSVC)
     target_compile_options(rhi_d3d11 PRIVATE /W3)
     target_compile_options(rhi_common PRIVATE /W3)
