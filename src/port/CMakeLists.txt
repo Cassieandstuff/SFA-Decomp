@@ -9,6 +9,15 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# The game freely stores pointers in u32 fields (e.g. gResourceFileBuffers[id] =
+# (u32)mmAlloc(...)), so the port MUST be built 32-bit or every stored pointer is
+# silently truncated. Fail loudly rather than miscompile.
+if(NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
+    message(FATAL_ERROR
+        "Stairfax port must be built 32-bit (x86): the game stores pointers in u32 "
+        "fields. Configure with an x86 toolchain (vcvarsall x64_x86) or -A Win32.")
+endif()
+
 # --- Backend toggles -------------------------------------------------------
 option(STAIRFAX_RHI_VULKAN "Enable Vulkan backend (primary)"                 ON)
 option(STAIRFAX_RHI_D3D12  "Enable D3D12 backend (primary on Windows)"        ON)
@@ -98,6 +107,13 @@ set(GAME_DEFS TARGET_PC=1 STAIRFAX_PORT=1 _CRT_SECURE_NO_WARNINGS=1)
 add_library(stairfax_os STATIC src/os_shim.c src/mm_shim.c)
 target_include_directories(stairfax_os PUBLIC ${GAME_INCLUDES})
 target_compile_definitions(stairfax_os PUBLIC ${GAME_DEFS})
+
+# --- First real game TU compiled on host (milestone / regression guard) -----
+# OBJECT library: compiles objanim.c through the shadow headers. Not linked into an
+# exe yet (it references sibling game TUs); compiling clean is the milestone.
+add_library(game_objanim OBJECT ${CMAKE_CURRENT_SOURCE_DIR}/../../src/main/objanim.c)
+target_include_directories(game_objanim PRIVATE ${GAME_INCLUDES})
+target_compile_definitions(game_objanim PRIVATE ${GAME_DEFS})
 
 # --- Smoketests ------------------------------------------------------------
 add_executable(rhi_smoketest src/tools/rhi_smoketest.c)

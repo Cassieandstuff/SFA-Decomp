@@ -123,6 +123,14 @@ void OSLockMutex(OSMutex* m) { (void)m; }
 void OSUnlockMutex(OSMutex* m) { (void)m; }
 BOOL OSTryLockMutex(OSMutex* m) { (void)m; return TRUE; }
 
+// --- stopwatch -------------------------------------------------------------
+void   OSInitStopwatch(OSStopwatch* sw, char* name) { if (sw) { memset(sw, 0, sizeof(*sw)); sw->name = name; } }
+void   OSStartStopwatch(OSStopwatch* sw) { if (sw) sw->last = OSGetTime(); }
+void   OSStopStopwatch(OSStopwatch* sw) { if (sw) { sw->total += OSGetTime() - sw->last; sw->hits++; } }
+OSTime OSCheckStopwatch(OSStopwatch* sw) { return sw ? sw->total : 0; }
+void   OSResetStopwatch(OSStopwatch* sw) { if (sw) { sw->total = 0; sw->hits = 0; } }
+void   OSDumpStopwatch(OSStopwatch* sw) { (void)sw; }
+
 // --- alarm (stub) ----------------------------------------------------------
 void OSCreateAlarm(OSAlarm* a) { (void)a; }
 void OSSetAlarm(OSAlarm* a, OSTime t, OSAlarmHandler h) { (void)a; (void)t; (void)h; }

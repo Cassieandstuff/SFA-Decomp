@@ -61,6 +61,22 @@ u32    OSGetTickRate(void); // bus clock / 4
 #define OSMillisecondsToTicks(ms) ((ms) * (OS_TIMER_CLOCK / 1000))
 #define OSSecondsToTicks(s)       ((s) * OS_TIMER_CLOCK)
 
+// --- stopwatch (fields match the real struct; game declares it by value) ---
+typedef struct OSStopwatch {
+    char*  name;
+    OSTime total;
+    u32    hits;
+    OSTime min;
+    OSTime max;
+    OSTime last;
+} OSStopwatch;
+void   OSInitStopwatch(OSStopwatch* sw, char* name);
+void   OSStartStopwatch(OSStopwatch* sw);
+void   OSStopStopwatch(OSStopwatch* sw);
+OSTime OSCheckStopwatch(OSStopwatch* sw);
+void   OSResetStopwatch(OSStopwatch* sw);
+void   OSDumpStopwatch(OSStopwatch* sw);
+
 // --- init / system ---------------------------------------------------------
 void OSInit(void);
 u32  OSGetConsoleType(void);
