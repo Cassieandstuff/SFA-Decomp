@@ -10,6 +10,7 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
+#include <d3dcompiler.h>
 #include <wrl/client.h>
 
 using Microsoft::WRL::ComPtr;
@@ -28,6 +29,17 @@ struct D3d11Instance {
     ComPtr<ID3D11Device>        device;
     ComPtr<ID3D11DeviceContext> ctx;
     D3d11Swapchain*             active = nullptr;
+
+    // Built-in position+color pipeline (created lazily on first drawColored).
+    ComPtr<ID3D11VertexShader>   vs;
+    ComPtr<ID3D11PixelShader>    ps;
+    ComPtr<ID3D11InputLayout>    layout;
+    ComPtr<ID3D11BlendState>     blend;
+    ComPtr<ID3D11RasterizerState> raster;
+    ComPtr<ID3D11DepthStencilState> depthOff;
+    ComPtr<ID3D11Buffer>         dynVB;
+    UINT                         dynVBCap = 0;
+    bool                         pipelineReady = false;
 };
 
 D3d11Instance* self(RhiInstance* r) { return reinterpret_cast<D3d11Instance*>(r); }
@@ -116,6 +128,84 @@ void d3d11_clear(RhiInstance* r, float cr, float cg, float cb, float ca) {
     s->ctx->ClearRenderTargetView(s->active->rtv.Get(), color);
 }
 
+static const char* kColorHLSL =
+    "struct VSIn  { float3 pos : POSITION; float4 col : COLOR; };\n"
+    "struct VSOut { float4 pos : SV_Position; float4 col : COLOR; };\n"
+    "VSOut vsmain(VSIn i){ VSOut o; o.pos = float4(i.pos, 1.0); o.col = i.col; return o; }\n"
+    "float4 psmain(VSOut i) : SV_Target { return i.col; }\n";
+
+bool buildPipeline(D3d11Instance* s) {
+    if (s->pipelineReady) return true;
+
+    ComPtr<ID3DBlob> vsb, psb, err;
+    if (FAILED(D3DCompile(kColorHLSL, strlen(kColorHLSL), "color", nullptr, nullptr,
+                          "vsmain", "vs_4_0", 0, 0, &vsb, &err))) return false;
+    if (FAILED(D3DCompile(kColorHLSL, strlen(kColorHLSL), "color", nullptr, nullptr,
+                          "psmain", "ps_4_0", 0, 0, &psb, &err))) return false;
+    if (FAILED(s->device->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &s->vs))) return false;
+    if (FAILED(s->device->CreatePixelShader(psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &s->ps))) return false;
+
+    D3D11_INPUT_ELEMENT_DESC elems[] = {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "COLOR",    0, DXGI_FORMAT_R8G8B8A8_UNORM,  0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+    };
+    if (FAILED(s->device->CreateInputLayout(elems, 2, vsb->GetBufferPointer(), vsb->GetBufferSize(), &s->layout))) return false;
+
+    D3D11_BLEND_DESC bd = {};
+    bd.RenderTarget[0].BlendEnable = FALSE;
+    bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    s->device->CreateBlendState(&bd, &s->blend);
+
+    D3D11_RASTERIZER_DESC rd = {};
+    rd.FillMode = D3D11_FILL_SOLID;
+    rd.CullMode = D3D11_CULL_NONE;   // GX cull handled later; draw everything for now
+    s->device->CreateRasterizerState(&rd, &s->raster);
+
+    D3D11_DEPTH_STENCIL_DESC dd = {}; // no depth buffer bound yet
+    dd.DepthEnable = FALSE;
+    s->device->CreateDepthStencilState(&dd, &s->depthOff);
+
+    s->pipelineReady = true;
+    return true;
+}
+
+void d3d11_drawColored(RhiInstance* r, const RhiColorVertex* verts, uint32_t count) {
+    D3d11Instance* s = self(r);
+    if (!verts || count == 0 || !s->active) return;
+    if (!buildPipeline(s)) return;
+
+    const UINT stride = (UINT)sizeof(RhiColorVertex);
+    const UINT needed = stride * count;
+    if (needed > s->dynVBCap) {
+        s->dynVB.Reset();
+        D3D11_BUFFER_DESC bd = {};
+        bd.ByteWidth = needed;
+        bd.Usage = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (FAILED(s->device->CreateBuffer(&bd, nullptr, &s->dynVB))) return;
+        s->dynVBCap = needed;
+    }
+
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    if (FAILED(s->ctx->Map(s->dynVB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
+    memcpy(mapped.pData, verts, needed);
+    s->ctx->Unmap(s->dynVB.Get(), 0);
+
+    ID3D11Buffer* vb = s->dynVB.Get();
+    UINT offset = 0;
+    s->ctx->IASetInputLayout(s->layout.Get());
+    s->ctx->IASetVertexBuffers(0, 1, &vb, &stride, &offset);
+    s->ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    s->ctx->VSSetShader(s->vs.Get(), nullptr, 0);
+    s->ctx->PSSetShader(s->ps.Get(), nullptr, 0);
+    const float bf[4] = {0,0,0,0};
+    s->ctx->OMSetBlendState(s->blend.Get(), bf, 0xffffffff);
+    s->ctx->OMSetDepthStencilState(s->depthOff.Get(), 0);
+    s->ctx->RSSetState(s->raster.Get());
+    s->ctx->Draw(count, 0);
+}
+
 void d3d11_destroy(RhiInstance* r) {
     D3d11Instance* s = self(r);
     if (!s) return;
@@ -133,6 +223,7 @@ const RhiOps kOps = {
     d3d11_beginFrame,
     d3d11_endFrame,
     d3d11_clear,
+    d3d11_drawColored,
 };
 
 } // namespace

@@ -43,7 +43,7 @@ target_include_directories(stairfax_platform PUBLIC ${RHI_INCLUDE})
 # D3D11 (real)
 add_library(rhi_d3d11 STATIC src/renderer/rhi_d3d11.cpp)
 target_include_directories(rhi_d3d11 PUBLIC ${RHI_INCLUDE})
-target_link_libraries(rhi_d3d11 PRIVATE d3d11 dxgi)
+target_link_libraries(rhi_d3d11 PRIVATE d3d11 dxgi d3dcompiler)
 
 # D3D12 (real)
 add_library(rhi_d3d12 STATIC src/renderer/rhi_d3d12.cpp)
@@ -77,6 +77,11 @@ target_link_libraries(rhi_common PUBLIC rhi_d3d11 rhi_d3d12 rhi_vulkan rhi_gl)
 add_library(stairfax_vi STATIC src/vi_shim.c)
 target_include_directories(stairfax_vi PUBLIC ${RHI_INCLUDE})
 target_link_libraries(stairfax_vi PUBLIC rhi_common stairfax_platform)
+
+# --- GX shim (GX -> RHI draw path) -----------------------------------------
+add_library(stairfax_gx STATIC src/gx_shim.c)
+target_include_directories(stairfax_gx PUBLIC ${RHI_INCLUDE})
+target_link_libraries(stairfax_gx PUBLIC rhi_common)
 
 # --- DVD/fileio shim (disc reads -> host filesystem) -----------------------
 add_library(stairfax_dvd STATIC src/dvd_shim.c)
@@ -136,6 +141,10 @@ add_executable(os_mm_smoketest src/tools/os_mm_smoketest.c)
 target_include_directories(os_mm_smoketest PRIVATE ${GAME_INCLUDES})
 target_compile_definitions(os_mm_smoketest PRIVATE ${GAME_DEFS})
 target_link_libraries(os_mm_smoketest PRIVATE stairfax_os)
+
+add_executable(gx_smoketest src/tools/gx_smoketest.c)
+target_include_directories(gx_smoketest PRIVATE ${RHI_INCLUDE})
+target_link_libraries(gx_smoketest PRIVATE stairfax_gx stairfax_platform)
 
 if(MSVC)
     target_compile_options(rhi_d3d11 PRIVATE /W3)

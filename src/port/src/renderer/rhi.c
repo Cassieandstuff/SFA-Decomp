@@ -84,6 +84,9 @@ void rhi_endFrame(RhiInstance* r) {
 void rhi_clear(RhiInstance* r, float cr, float cg, float cb, float ca) {
     if (r && r->ops && r->ops->clear) r->ops->clear(r, cr, cg, cb, ca);
 }
+void rhi_drawColored(RhiInstance* r, const RhiColorVertex* verts, uint32_t count) {
+    if (r && r->ops && r->ops->drawColored) r->ops->drawColored(r, verts, count);
+}
 
 // --- Not yet implemented (this stage is window+clear only) -----------------
 // Declared in rhi.h; routed through ops once the draw/pipeline path lands.

@@ -71,6 +71,18 @@ void        rhi_destroyTexture(RhiInstance* rhi, RhiTexture* tex);
 RhiBuffer*  rhi_createBuffer(RhiInstance* rhi, size_t size, const void* data, bool dynamic);
 void        rhi_destroyBuffer(RhiInstance* rhi, RhiBuffer* buf);
 
+// Immediate-mode colored draw - the first GX draw-path brick.
+// gx_shim accumulates GX immediate-mode vertices (GXBegin/GXPosition/GXColor/GXEnd)
+// into these and issues one call per primitive batch; the backend uploads to an
+// internal dynamic vertex buffer and draws with a built-in position+color pipeline.
+// Must be called between rhi_beginFrame and rhi_endFrame. Positions are clip-space
+// for now (w=1); GX matrix transform + TEV ubershaders + textures come next.
+typedef struct RhiColorVertex {
+    float    x, y, z;
+    uint32_t rgba; // memory byte order R,G,B,A (== r | g<<8 | b<<16 | a<<24)
+} RhiColorVertex;
+void rhi_drawColored(RhiInstance* rhi, const RhiColorVertex* verts, uint32_t count);
+
 // Draw - called from gx_shim_submitFifo path (GXWGFifo emulation)
 void rhi_setPipeline(RhiInstance* rhi, RhiPipeline* pipe);
 void rhi_setTexture(RhiInstance* rhi, int slot, RhiTexture* tex);
