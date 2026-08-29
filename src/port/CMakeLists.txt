@@ -69,6 +69,10 @@ add_library(stairfax_vi STATIC src/vi_shim.c)
 target_include_directories(stairfax_vi PUBLIC ${RHI_INCLUDE})
 target_link_libraries(stairfax_vi PUBLIC rhi_common stairfax_platform)
 
+# --- DVD/fileio shim (disc reads -> host filesystem) -----------------------
+add_library(stairfax_dvd STATIC src/dvd_shim.c)
+target_include_directories(stairfax_dvd PUBLIC ${RHI_INCLUDE})
+
 # --- Smoketests ------------------------------------------------------------
 add_executable(rhi_smoketest src/tools/rhi_smoketest.c)
 target_include_directories(rhi_smoketest PRIVATE ${RHI_INCLUDE})
@@ -77,6 +81,10 @@ target_link_libraries(rhi_smoketest PRIVATE rhi_common stairfax_platform)
 add_executable(vi_smoketest src/tools/vi_smoketest.c)
 target_include_directories(vi_smoketest PRIVATE ${RHI_INCLUDE})
 target_link_libraries(vi_smoketest PRIVATE stairfax_vi)
+
+add_executable(dvd_smoketest src/tools/dvd_smoketest.c)
+target_include_directories(dvd_smoketest PRIVATE ${RHI_INCLUDE})
+target_link_libraries(dvd_smoketest PRIVATE stairfax_dvd)
 
 if(MSVC)
     target_compile_options(rhi_d3d11 PRIVATE /W3)

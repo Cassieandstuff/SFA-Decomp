@@ -1,7 +1,15 @@
 #pragma once
-// dvd_shim.h - DVD/fileio -> host filesystem
-// Shadows include/dolphin/dvd.h + include/main/fileio.h
-// Host implements DVDFileInfo as host file handle + bulk data
+// dvd_shim.h - DVD / fileio on the host filesystem.
+//
+// The game reads its data through the Dolphin DVD API (DVDOpen/Read/Close by path)
+// and the high-level fileLoad(id) wrappers (id -> name table -> DVD -> cached
+// buffer). The console reads sectors off the disc; the host reads files from an
+// extracted disc directory (the "disc root"). Reads return raw bytes - disc data
+// is big-endian and stays that way here; consumers byte-swap.
+//
+// DVDFileInfo keeps the one field game code reads (.length) plus host internals.
+// Binary layout need not match the console (this is a native build); field names
+// that game TUs reference must.
 
 #include <stdint.h>
 #include <stddef.h>
@@ -11,43 +19,39 @@ extern "C" {
 #endif
 
 typedef struct DVDFileInfo {
-    // Host extension: not binary-compatible with GC, but layout matches what fileLoad() uses
-    void*  hostData;
-    uint32_t hostSize;
-    int    fileId; // MLDF_FILEID_* or raw path hash
-    int    offset;
+    int32_t length;        // file size in bytes - game reads fileInfo.length
+    int32_t startAddr;     // disc offset on console; unused on host, kept for shape
+    void*   hostFile;      // FILE* held open between DVDOpen and DVDClose
+    char    hostPath[260]; // resolved host path
 } DVDFileInfo;
 
 typedef struct DVDCommandBlock DVDCommandBlock;
-typedef void (*DVDCallback)(int result, DVDFileInfo* info);
+typedef void (*DVDCallback)(int32_t result, DVDFileInfo* info);
 
-// Keep original signatures from include/dolphin/dvd.h
-int DVDOpen(const char* path, DVDFileInfo* info);
-int DVDRead(DVDFileInfo* info, void* buf, int32_t size, int32_t offset);
-int DVDClose(DVDFileInfo* info);
-int DVDReadAsyncPrio(DVDFileInfo* info, void* buf, int32_t size, int32_t offset, DVDCallback cb, int prio);
-int DVDGetDriveStatus(void);
-int DVDGetCommandBlockStatus(DVDCommandBlock* block);
-void DVDInit(void);
+// Dolphin DVD API (host-backed). Return conventions match dolphin/dvd.h:
+//   DVDOpen  -> nonzero on success, 0 on failure
+//   DVDRead  -> bytes transferred, or -1 on error
+//   DVDReadAsyncPrio -> nonzero if queued (callback fires with the result)
+void    DVDInit(void);
+int32_t DVDOpen(const char* path, DVDFileInfo* info);
+int32_t DVDClose(DVDFileInfo* info);
+int32_t DVDRead(DVDFileInfo* info, void* buf, int32_t size, int32_t offset);
+int32_t DVDReadAsyncPrio(DVDFileInfo* info, void* buf, int32_t size, int32_t offset, DVDCallback cb, int32_t prio);
+int32_t DVDGetDriveStatus(void);
+int32_t DVDGetCommandBlockStatus(DVDCommandBlock* block);
+void    DVDSetAutoInvalidation(int32_t enable);
 
-#define DVD_FI_LENGTH(info) ((info)->hostSize)
+// Game high-level wrappers (replaces src/main/fileio.c + pi_dolphin.c file path).
+void*   loadFileByPath(char* path, int* outSize, int unused);
+void*   fileLoad(int id, int heap);
+int     fileLoadToBuffer(int id, void* buffer);
+int     fileLoadToBufferOffset(int id, void* dst, int offset, int size);
+int32_t fileGetSize(int id);
 
-// Game's high-level wrappers (src/main/pi_dolphin.c:323)
-void* fileLoad(int id, int heap);
-int   fileLoadToBuffer(int id, void* buffer);
-int   fileLoadToBufferOffset(int id, void* dst, int offset, int size);
-void* textureLoad(int id, int heap);
-void* loadModelInstance(int id, int heap, void* tmp);
-void* loadAnimation(void* modelHeader, int animId, int moveIndex, uint8_t* cache);
-
-// Compatibility shims for old fileio.h
-void setFileInfo(DVDFileInfo* info);
-void* loadFileByPath(char* path, int* outSize, int unused);
-int   DVDReadAsyncPrio_Stub(DVDFileInfo* f, void* b, int32_t s, int32_t o, DVDCallback cb, int p);
-
-// Host init
-int dvd_shim_init(const char* discRootOrIsoPath);
+// Host control.
+int  dvd_shim_init(const char* discRoot);   // extracted-disc directory; loads filetable.txt if present
 void dvd_shim_shutdown(void);
+int  dvd_shim_setName(int id, const char* relPath); // register/override an id -> path mapping
 
 #ifdef __cplusplus
 }
