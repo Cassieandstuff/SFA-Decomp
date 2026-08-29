@@ -83,6 +83,11 @@ typedef struct RhiColorVertex {
 } RhiColorVertex;
 void rhi_drawColored(RhiInstance* rhi, const RhiColorVertex* verts, uint32_t count);
 
+// Set the model-view-projection applied to subsequent rhi_drawColored vertices.
+// 16 floats, ROW-MAJOR: m[0..3] = row 0, etc. clip = M * (x,y,z,1). gx_shim passes
+// proj*posmtx here. Defaults to identity (clip-space passthrough) until set.
+void rhi_setColorTransform(RhiInstance* rhi, const float m[16]);
+
 // Draw - called from gx_shim_submitFifo path (GXWGFifo emulation)
 void rhi_setPipeline(RhiInstance* rhi, RhiPipeline* pipe);
 void rhi_setTexture(RhiInstance* rhi, int slot, RhiTexture* tex);

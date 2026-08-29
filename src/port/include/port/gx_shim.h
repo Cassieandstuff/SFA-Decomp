@@ -36,11 +36,21 @@ struct RhiSwapchain;
 void gx_shim_setRhi(struct RhiInstance* rhi, struct RhiSwapchain* sc);
 struct RhiInstance* gx_shim_getRhi(void);
 
+// Projection type + position-matrix slot ids (subset of dolphin/gx).
+enum { GX_PERSPECTIVE = 0, GX_ORTHOGRAPHIC = 1 };
+enum { GX_PNMTX0 = 0, GX_PNMTX1 = 3, GX_PNMTX2 = 6, GX_PNMTX3 = 9 };
+
 // Minimal lifecycle.
 void GXInit_host(void);           // host init (real GXInit returns a GXFifoObj*)
 void GXSetViewport(float x, float y, float w, float h, float nearz, float farz);
 void GXSetScissor(uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 void GXSetCullMode(int mode);
+
+// Transform: position (modelview) matrix memory + projection. The combined
+// proj*posmtx is uploaded to the RHI as the MVP before each draw.
+void GXLoadPosMtxImm(float mtx[3][4], uint32_t id);  // load 3x4 into matrix slot
+void GXSetCurrentMtx(uint32_t id);                    // select current pos matrix
+void GXSetProjection(float proj[4][4], int type);     // 4x4 projection
 
 // Immediate mode.
 void GXBegin(uint8_t primitive, uint8_t vtxfmt, uint16_t nverts);

@@ -39,6 +39,8 @@ struct D3d11Instance {
     ComPtr<ID3D11DepthStencilState> depthOff;
     ComPtr<ID3D11Buffer>         dynVB;
     UINT                         dynVBCap = 0;
+    ComPtr<ID3D11Buffer>         cbXform; // 4x4 MVP (row-major)
+    float                        mvp[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     bool                         pipelineReady = false;
 };
 
@@ -129,9 +131,12 @@ void d3d11_clear(RhiInstance* r, float cr, float cg, float cb, float ca) {
 }
 
 static const char* kColorHLSL =
+    "cbuffer Xform : register(b0) { float4 uRows[4]; };\n"
     "struct VSIn  { float3 pos : POSITION; float4 col : COLOR; };\n"
     "struct VSOut { float4 pos : SV_Position; float4 col : COLOR; };\n"
-    "VSOut vsmain(VSIn i){ VSOut o; o.pos = float4(i.pos, 1.0); o.col = i.col; return o; }\n"
+    "VSOut vsmain(VSIn i){ float4 p = float4(i.pos, 1.0); VSOut o;\n"
+    "  o.pos = float4(dot(uRows[0],p), dot(uRows[1],p), dot(uRows[2],p), dot(uRows[3],p));\n"
+    "  o.col = i.col; return o; }\n"
     "float4 psmain(VSOut i) : SV_Target { return i.col; }\n";
 
 bool buildPipeline(D3d11Instance* s) {
@@ -165,8 +170,19 @@ bool buildPipeline(D3d11Instance* s) {
     dd.DepthEnable = FALSE;
     s->device->CreateDepthStencilState(&dd, &s->depthOff);
 
+    D3D11_BUFFER_DESC cbd = {};
+    cbd.ByteWidth = 16 * sizeof(float);
+    cbd.Usage = D3D11_USAGE_DYNAMIC;
+    cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    s->device->CreateBuffer(&cbd, nullptr, &s->cbXform);
+
     s->pipelineReady = true;
     return true;
+}
+
+void d3d11_setColorTransform(RhiInstance* r, const float m[16]) {
+    memcpy(self(r)->mvp, m, 16 * sizeof(float));
 }
 
 void d3d11_drawColored(RhiInstance* r, const RhiColorVertex* verts, uint32_t count) {
@@ -192,11 +208,19 @@ void d3d11_drawColored(RhiInstance* r, const RhiColorVertex* verts, uint32_t cou
     memcpy(mapped.pData, verts, needed);
     s->ctx->Unmap(s->dynVB.Get(), 0);
 
+    D3D11_MAPPED_SUBRESOURCE cbm;
+    if (SUCCEEDED(s->ctx->Map(s->cbXform.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &cbm))) {
+        memcpy(cbm.pData, s->mvp, 16 * sizeof(float));
+        s->ctx->Unmap(s->cbXform.Get(), 0);
+    }
+
     ID3D11Buffer* vb = s->dynVB.Get();
+    ID3D11Buffer* cb = s->cbXform.Get();
     UINT offset = 0;
     s->ctx->IASetInputLayout(s->layout.Get());
     s->ctx->IASetVertexBuffers(0, 1, &vb, &stride, &offset);
     s->ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    s->ctx->VSSetConstantBuffers(0, 1, &cb);
     s->ctx->VSSetShader(s->vs.Get(), nullptr, 0);
     s->ctx->PSSetShader(s->ps.Get(), nullptr, 0);
     const float bf[4] = {0,0,0,0};
@@ -224,6 +248,7 @@ const RhiOps kOps = {
     d3d11_endFrame,
     d3d11_clear,
     d3d11_drawColored,
+    d3d11_setColorTransform,
 };
 
 } // namespace

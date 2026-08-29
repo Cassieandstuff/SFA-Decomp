@@ -22,13 +22,53 @@ static uint8_t        gPrim;
 static RhiColorVertex gCur;
 static bool           gHavePos;
 
+// --- transform state -------------------------------------------------------
+#define GX_MTX_SLOTS 64
+static float gProj[4][4];
+static float gPosMtx[GX_MTX_SLOTS][3][4];
+static int   gCurMtx;
+
+static void mtxIdentity3x4(float m[3][4]) {
+    memset(m, 0, sizeof(float) * 12);
+    m[0][0] = m[1][1] = m[2][2] = 1.0f;
+}
+static void mtxIdentity4x4(float m[4][4]) {
+    memset(m, 0, sizeof(float) * 16);
+    m[0][0] = m[1][1] = m[2][2] = m[3][3] = 1.0f;
+}
+
+// MVP = proj(4x4) * posMtx(3x4 extended with [0,0,0,1]); row-major output.
+static void computeMVP(float out[16]) {
+    float P[4][4];
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 4; ++j) P[i][j] = gPosMtx[gCurMtx][i][j];
+    P[3][0] = P[3][1] = P[3][2] = 0.0f; P[3][3] = 1.0f;
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j) {
+            float s = 0.0f;
+            for (int k = 0; k < 4; ++k) s += gProj[i][k] * P[k][j];
+            out[i * 4 + j] = s;
+        }
+}
+
 void gx_shim_setRhi(struct RhiInstance* rhi, struct RhiSwapchain* sc) { gRhi = rhi; gSc = sc; }
 struct RhiInstance* gx_shim_getRhi(void) { return gRhi; }
 
-void GXInit_host(void) { gCount = 0; gHavePos = false; }
+void GXInit_host(void) {
+    gCount = 0; gHavePos = false; gCurMtx = 0;
+    mtxIdentity4x4(gProj);
+    for (int i = 0; i < GX_MTX_SLOTS; ++i) mtxIdentity3x4(gPosMtx[i]);
+}
 void GXSetViewport(float x, float y, float w, float h, float n, float f) { (void)x;(void)y;(void)w;(void)h;(void)n;(void)f; }
 void GXSetScissor(uint32_t x, uint32_t y, uint32_t w, uint32_t h) { (void)x;(void)y;(void)w;(void)h; }
 void GXSetCullMode(int mode) { (void)mode; }
+
+void GXLoadPosMtxImm(float mtx[3][4], uint32_t id) {
+    if (id >= GX_MTX_SLOTS) return;
+    memcpy(gPosMtx[id], mtx, sizeof(float) * 12);
+}
+void GXSetCurrentMtx(uint32_t id) { if (id < GX_MTX_SLOTS) gCurMtx = (int)id; }
+void GXSetProjection(float proj[4][4], int type) { (void)type; memcpy(gProj, proj, sizeof(float) * 16); }
 
 void GXBegin(uint8_t primitive, uint8_t vtxfmt, uint16_t nverts) {
     (void)vtxfmt; (void)nverts;
@@ -60,6 +100,10 @@ void GXColor4u8(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
 // Expand the primitive into a triangle list, then draw.
 static void flushBatch(void) {
     if (!gRhi || gCount == 0) return;
+
+    float mvp[16];
+    computeMVP(mvp);
+    rhi_setColorTransform(gRhi, mvp);
 
     if (gPrim == GX_TRIANGLES) {
         rhi_drawColored(gRhi, gVerts, (uint32_t)(gCount - gCount % 3));

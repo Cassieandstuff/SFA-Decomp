@@ -87,6 +87,9 @@ void rhi_clear(RhiInstance* r, float cr, float cg, float cb, float ca) {
 void rhi_drawColored(RhiInstance* r, const RhiColorVertex* verts, uint32_t count) {
     if (r && r->ops && r->ops->drawColored) r->ops->drawColored(r, verts, count);
 }
+void rhi_setColorTransform(RhiInstance* r, const float m[16]) {
+    if (r && r->ops && r->ops->setColorTransform) r->ops->setColorTransform(r, m);
+}
 
 // --- Not yet implemented (this stage is window+clear only) -----------------
 // Declared in rhi.h; routed through ops once the draw/pipeline path lands.

@@ -90,6 +90,7 @@ struct VkApi {
     PFN_vkCmdSetViewport cmdSetViewport = nullptr;
     PFN_vkCmdSetScissor cmdSetScissor = nullptr;
     PFN_vkCmdDraw cmdDraw = nullptr;
+    PFN_vkCmdPushConstants cmdPushConstants = nullptr;
     PFN_vkCreateBuffer createBuffer = nullptr;
     PFN_vkDestroyBuffer destroyBuffer = nullptr;
     PFN_vkGetBufferMemoryRequirements getBufferMemoryRequirements = nullptr;
@@ -142,6 +143,7 @@ struct VkInst {
     uint32_t  imageIndex = 0;
     bool      rpActive   = false;
     float     clearColor[4] = {0, 0, 0, 1};
+    float     mvp[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1}; // row-major
 };
 
 VkInst* self(RhiInstance* r) { return reinterpret_cast<VkInst*>(r); }
@@ -207,6 +209,7 @@ bool loadDeviceProcs(VkApi* api, VkDevice dev) {
     GDPA(cmdSetViewport, vkCmdSetViewport);
     GDPA(cmdSetScissor, vkCmdSetScissor);
     GDPA(cmdDraw, vkCmdDraw);
+    GDPA(cmdPushConstants, vkCmdPushConstants);
     GDPA(createBuffer, vkCreateBuffer);
     GDPA(destroyBuffer, vkDestroyBuffer);
     GDPA(getBufferMemoryRequirements, vkGetBufferMemoryRequirements);
@@ -278,8 +281,14 @@ bool buildRenderPass(VkInst* s, VkFormat fmt) {
 bool buildPipeline(VkInst* s) {
     VkApi* api = &s->api;
 
+    VkPushConstantRange pcr = {};
+    pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    pcr.offset = 0;
+    pcr.size = 16 * sizeof(float);
     VkPipelineLayoutCreateInfo lci = {};
     lci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    lci.pushConstantRangeCount = 1;
+    lci.pPushConstantRanges = &pcr;
     if (api->createPipelineLayout(s->device, &lci, nullptr, &s->pipelineLayout) != VK_SUCCESS) return false;
 
     VkShaderModule vs = makeModule(s, kTriVertSpv, sizeof(kTriVertSpv));
@@ -569,9 +578,14 @@ void vulkan_drawColored(RhiInstance* r, const RhiColorVertex* verts, uint32_t co
 
     beginRenderPassIfNeeded(s);
     api->cmdBindPipeline(s->cmd[fr], VK_PIPELINE_BIND_POINT_GRAPHICS, s->pipeline);
+    api->cmdPushConstants(s->cmd[fr], s->pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, 16 * sizeof(float), s->mvp);
     VkDeviceSize offset = 0;
     api->cmdBindVertexBuffers(s->cmd[fr], 0, 1, &s->vbo[fr], &offset);
     api->cmdDraw(s->cmd[fr], count, 1, 0, 0);
+}
+
+void vulkan_setColorTransform(RhiInstance* r, const float m[16]) {
+    memcpy(self(r)->mvp, m, 16 * sizeof(float));
 }
 
 void vulkan_endFrame(RhiInstance* r) {
@@ -651,6 +665,7 @@ const RhiOps kOps = {
     vulkan_endFrame,
     vulkan_clear,
     vulkan_drawColored,
+    vulkan_setColorTransform,
 };
 
 bool loadLoader(VkApi* api) {

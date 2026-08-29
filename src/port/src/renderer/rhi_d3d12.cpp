@@ -49,6 +49,7 @@ struct D3d12Instance {
     ComPtr<ID3D12Resource>      uploadVB;   // persistently-mapped upload heap
     void*                       mappedVB = nullptr;
     UINT                        uploadCap = 0;
+    float                       mvp[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     bool                        pipelineReady = false;
 };
 
@@ -224,15 +225,26 @@ bool d3d12_present(RhiInstance* r, RhiSwapchain* h) {
 }
 
 static const char* kColorHLSL12 =
+    "cbuffer Xform : register(b0) { float4 uRows[4]; };\n"
     "struct VSIn  { float3 pos : POSITION; float4 col : COLOR; };\n"
     "struct VSOut { float4 pos : SV_Position; float4 col : COLOR; };\n"
-    "VSOut vsmain(VSIn i){ VSOut o; o.pos = float4(i.pos, 1.0); o.col = i.col; return o; }\n"
+    "VSOut vsmain(VSIn i){ float4 p = float4(i.pos, 1.0); VSOut o;\n"
+    "  o.pos = float4(dot(uRows[0],p), dot(uRows[1],p), dot(uRows[2],p), dot(uRows[3],p));\n"
+    "  o.col = i.col; return o; }\n"
     "float4 psmain(VSOut i) : SV_Target { return i.col; }\n";
 
 bool buildPipeline12(D3d12Instance* s) {
     if (s->pipelineReady) return true;
 
+    D3D12_ROOT_PARAMETER rp = {};
+    rp.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    rp.Constants.ShaderRegister = 0;   // b0
+    rp.Constants.Num32BitValues = 16;  // 4x4 MVP
+    rp.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+
     D3D12_ROOT_SIGNATURE_DESC rsd = {};
+    rsd.NumParameters = 1;
+    rsd.pParameters = &rp;
     rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
     ComPtr<ID3DBlob> sig, serr;
     if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &serr))) return false;
@@ -304,10 +316,15 @@ void d3d12_drawColored(RhiInstance* r, const RhiColorVertex* verts, uint32_t cou
     vbv.StrideInBytes = stride;
 
     s->cmdList->SetGraphicsRootSignature(s->rootSig.Get());
+    s->cmdList->SetGraphicsRoot32BitConstants(0, 16, s->mvp, 0);
     s->cmdList->SetPipelineState(s->pso.Get());
     s->cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     s->cmdList->IASetVertexBuffers(0, 1, &vbv);
     s->cmdList->DrawInstanced(count, 1, 0, 0);
+}
+
+void d3d12_setColorTransform(RhiInstance* r, const float m[16]) {
+    memcpy(self(r)->mvp, m, 16 * sizeof(float));
 }
 
 void d3d12_destroy(RhiInstance* r) {
@@ -332,6 +349,7 @@ const RhiOps kOps = {
     d3d12_endFrame,
     d3d12_clear,
     d3d12_drawColored,
+    d3d12_setColorTransform,
 };
 
 bool pickAdapter(IDXGIFactory4* factory, ComPtr<IDXGIAdapter1>& out) {
