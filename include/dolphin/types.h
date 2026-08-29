@@ -59,7 +59,7 @@ typedef int BOOL;
 
 #if defined(__MWERKS__)
 #define AT_ADDRESS(addr) : (addr)
-#elif defined(__GNUC__)
+#elif defined(__GNUC__) || defined(_MSC_VER)
 #define AT_ADDRESS(addr)
 #else
 #error unknown compiler

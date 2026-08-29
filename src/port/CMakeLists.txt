@@ -73,6 +73,32 @@ target_link_libraries(stairfax_vi PUBLIC rhi_common stairfax_platform)
 add_library(stairfax_dvd STATIC src/dvd_shim.c)
 target_include_directories(stairfax_dvd PUBLIC ${RHI_INCLUDE})
 
+# Include layout + defines for compiling GAME code (and shims that shadow dolphin
+# headers). Order is deliberate:
+#   1. src/port/include  - host shadows (dolphin/os.h etc.) win first
+#   2. MSVC system dirs  - so <string.h>/<stddef.h>/<stdlib.h> resolve to the real
+#                          libc, NOT the repo's freestanding stubs (meant for MWCC)
+#   3. repo include/     - provides dolphin/*, main/*, types.h (non-libc)
+#   4. repo root
+# Without (2) the repo's freestanding libc headers shadow the system ones and break
+# size_t / malloc declarations. This only affects the host build; MWCC is untouched.
+set(MSVC_SYS_INCLUDES "")
+if(MSVC AND DEFINED ENV{INCLUDE})
+    file(TO_CMAKE_PATH "$ENV{INCLUDE}" MSVC_SYS_INCLUDES)
+endif()
+set(GAME_INCLUDES
+    ${CMAKE_CURRENT_SOURCE_DIR}/include        # src/port/include - shadows dolphin/*
+    ${MSVC_SYS_INCLUDES}                         # real libc before repo stubs
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../include   # repo include/
+    ${CMAKE_CURRENT_SOURCE_DIR}/../..           # repo root
+)
+set(GAME_DEFS TARGET_PC=1 STAIRFAX_PORT=1 _CRT_SECURE_NO_WARNINGS=1)
+
+# --- OS + mm shims (Dolphin OS API + game memory manager) ------------------
+add_library(stairfax_os STATIC src/os_shim.c src/mm_shim.c)
+target_include_directories(stairfax_os PUBLIC ${GAME_INCLUDES})
+target_compile_definitions(stairfax_os PUBLIC ${GAME_DEFS})
+
 # --- Smoketests ------------------------------------------------------------
 add_executable(rhi_smoketest src/tools/rhi_smoketest.c)
 target_include_directories(rhi_smoketest PRIVATE ${RHI_INCLUDE})
@@ -89,6 +115,11 @@ target_link_libraries(dvd_smoketest PRIVATE stairfax_dvd)
 add_executable(disc_ls src/tools/disc_ls.c)
 target_include_directories(disc_ls PRIVATE ${RHI_INCLUDE})
 target_link_libraries(disc_ls PRIVATE stairfax_dvd)
+
+add_executable(os_mm_smoketest src/tools/os_mm_smoketest.c)
+target_include_directories(os_mm_smoketest PRIVATE ${GAME_INCLUDES})
+target_compile_definitions(os_mm_smoketest PRIVATE ${GAME_DEFS})
+target_link_libraries(os_mm_smoketest PRIVATE stairfax_os)
 
 if(MSVC)
     target_compile_options(rhi_d3d11 PRIVATE /W3)
