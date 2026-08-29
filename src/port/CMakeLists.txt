@@ -64,10 +64,19 @@ add_library(rhi_common STATIC src/renderer/rhi.c)
 target_include_directories(rhi_common PUBLIC ${RHI_INCLUDE})
 target_link_libraries(rhi_common PUBLIC rhi_d3d11 rhi_d3d12 rhi_vulkan rhi_gl)
 
-# --- Smoketest (the milestone target) --------------------------------------
+# --- VI shim (video interface -> RHI + window) -----------------------------
+add_library(stairfax_vi STATIC src/vi_shim.c)
+target_include_directories(stairfax_vi PUBLIC ${RHI_INCLUDE})
+target_link_libraries(stairfax_vi PUBLIC rhi_common stairfax_platform)
+
+# --- Smoketests ------------------------------------------------------------
 add_executable(rhi_smoketest src/tools/rhi_smoketest.c)
 target_include_directories(rhi_smoketest PRIVATE ${RHI_INCLUDE})
 target_link_libraries(rhi_smoketest PRIVATE rhi_common stairfax_platform)
+
+add_executable(vi_smoketest src/tools/vi_smoketest.c)
+target_include_directories(vi_smoketest PRIVATE ${RHI_INCLUDE})
+target_link_libraries(vi_smoketest PRIVATE stairfax_vi)
 
 if(MSVC)
     target_compile_options(rhi_d3d11 PRIVATE /W3)

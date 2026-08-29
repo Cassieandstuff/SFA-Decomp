@@ -3,12 +3,15 @@
 // Shadows include/dolphin/vi.h
 
 #include <stdint.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef struct GXRenderModeObj GXRenderModeObj; // from dolphin/gx
+typedef struct RhiInstance RhiInstance;         // from renderer/rhi.h
+typedef struct PlatWindow  PlatWindow;          // from plat_window.h
 
 void VIInit(void);
 void VIConfigure(GXRenderModeObj* rmode);
@@ -24,10 +27,12 @@ typedef void (*VIRetraceCallback)(uint32_t count);
 VIRetraceCallback VISetPreRetraceCallback(VIRetraceCallback cb);
 VIRetraceCallback VISetPostRetraceCallback(VIRetraceCallback cb);
 
-// Host helpers
-void* vi_shim_getWindow(void);
-void vi_shim_pollEvents(void);
-int vi_shim_shouldClose(void);
+// Host helpers - expose the objects VI owns so pad/gx shims and tools can reach them.
+PlatWindow*  vi_host_window(void);   // the host window VI created
+RhiInstance* vi_host_rhi(void);      // the RHI instance VI created
+void*        vi_shim_getWindow(void); // native handle (HWND) for input shims
+void         vi_shim_pollEvents(void);
+int          vi_shim_shouldClose(void);
 
 #ifdef __cplusplus
 }
