@@ -48,7 +48,7 @@ target_link_libraries(rhi_d3d11 PRIVATE d3d11 dxgi d3dcompiler)
 # D3D12 (real)
 add_library(rhi_d3d12 STATIC src/renderer/rhi_d3d12.cpp)
 target_include_directories(rhi_d3d12 PUBLIC ${RHI_INCLUDE})
-target_link_libraries(rhi_d3d12 PRIVATE d3d12 dxgi)
+target_link_libraries(rhi_d3d12 PRIVATE d3d12 dxgi d3dcompiler)
 
 # Vulkan: real if the SDK headers are found, otherwise a link-satisfying stub.
 find_package(Vulkan QUIET)

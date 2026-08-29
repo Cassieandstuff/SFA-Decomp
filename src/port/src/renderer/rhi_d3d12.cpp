@@ -11,6 +11,7 @@
 #include <windows.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
+#include <d3dcompiler.h>
 #include <wrl/client.h>
 
 using Microsoft::WRL::ComPtr;
@@ -41,6 +42,14 @@ struct D3d12Instance {
     ComPtr<ID3D12CommandQueue>         queue;
     ComPtr<ID3D12GraphicsCommandList>  cmdList;
     D3d12Swapchain*                    active = nullptr;
+
+    // Built-in position+color pipeline (created lazily on first drawColored).
+    ComPtr<ID3D12RootSignature> rootSig;
+    ComPtr<ID3D12PipelineState> pso;
+    ComPtr<ID3D12Resource>      uploadVB;   // persistently-mapped upload heap
+    void*                       mappedVB = nullptr;
+    UINT                        uploadCap = 0;
+    bool                        pipelineReady = false;
 };
 
 D3d12Instance* self(RhiInstance* r) { return reinterpret_cast<D3d12Instance*>(r); }
@@ -214,6 +223,93 @@ bool d3d12_present(RhiInstance* r, RhiSwapchain* h) {
     return true;
 }
 
+static const char* kColorHLSL12 =
+    "struct VSIn  { float3 pos : POSITION; float4 col : COLOR; };\n"
+    "struct VSOut { float4 pos : SV_Position; float4 col : COLOR; };\n"
+    "VSOut vsmain(VSIn i){ VSOut o; o.pos = float4(i.pos, 1.0); o.col = i.col; return o; }\n"
+    "float4 psmain(VSOut i) : SV_Target { return i.col; }\n";
+
+bool buildPipeline12(D3d12Instance* s) {
+    if (s->pipelineReady) return true;
+
+    D3D12_ROOT_SIGNATURE_DESC rsd = {};
+    rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+    ComPtr<ID3DBlob> sig, serr;
+    if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &serr))) return false;
+    if (FAILED(s->device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+                                              IID_PPV_ARGS(&s->rootSig)))) return false;
+
+    ComPtr<ID3DBlob> vsb, psb, cerr;
+    if (FAILED(D3DCompile(kColorHLSL12, strlen(kColorHLSL12), "color", nullptr, nullptr,
+                          "vsmain", "vs_5_0", 0, 0, &vsb, &cerr))) return false;
+    if (FAILED(D3DCompile(kColorHLSL12, strlen(kColorHLSL12), "color", nullptr, nullptr,
+                          "psmain", "ps_5_0", 0, 0, &psb, &cerr))) return false;
+
+    D3D12_INPUT_ELEMENT_DESC elems[] = {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "COLOR",    0, DXGI_FORMAT_R8G8B8A8_UNORM,  0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+    };
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd = {};
+    pd.pRootSignature = s->rootSig.Get();
+    pd.VS = { vsb->GetBufferPointer(), vsb->GetBufferSize() };
+    pd.PS = { psb->GetBufferPointer(), psb->GetBufferSize() };
+    pd.InputLayout = { elems, 2 };
+    pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pd.RasterizerState.DepthClipEnable = TRUE;
+    pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pd.DepthStencilState.DepthEnable = FALSE;
+    pd.DepthStencilState.StencilEnable = FALSE;
+    pd.SampleMask = UINT_MAX;
+    pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pd.NumRenderTargets = 1;
+    pd.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    pd.DSVFormat = DXGI_FORMAT_UNKNOWN;
+    pd.SampleDesc.Count = 1;
+    if (FAILED(s->device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&s->pso)))) return false;
+
+    s->pipelineReady = true;
+    return true;
+}
+
+void d3d12_drawColored(RhiInstance* r, const RhiColorVertex* verts, uint32_t count) {
+    D3d12Instance* s = self(r);
+    if (!verts || count == 0 || !s->active) return;
+    if (!buildPipeline12(s)) return;
+
+    const UINT stride = (UINT)sizeof(RhiColorVertex);
+    const UINT needed = stride * count;
+    if (needed > s->uploadCap) {
+        if (s->uploadVB) { s->uploadVB->Unmap(0, nullptr); s->uploadVB.Reset(); s->mappedVB = nullptr; }
+        D3D12_HEAP_PROPERTIES hp = {}; hp.Type = D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC rd = {};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = needed;
+        rd.Height = 1; rd.DepthOrArraySize = 1; rd.MipLevels = 1;
+        rd.Format = DXGI_FORMAT_UNKNOWN;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if (FAILED(s->device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&s->uploadVB)))) return;
+        D3D12_RANGE none = {0, 0};
+        if (FAILED(s->uploadVB->Map(0, &none, &s->mappedVB))) { s->uploadVB.Reset(); return; }
+        s->uploadCap = needed;
+    }
+    memcpy(s->mappedVB, verts, needed);
+
+    D3D12_VERTEX_BUFFER_VIEW vbv = {};
+    vbv.BufferLocation = s->uploadVB->GetGPUVirtualAddress();
+    vbv.SizeInBytes = needed;
+    vbv.StrideInBytes = stride;
+
+    s->cmdList->SetGraphicsRootSignature(s->rootSig.Get());
+    s->cmdList->SetPipelineState(s->pso.Get());
+    s->cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    s->cmdList->IASetVertexBuffers(0, 1, &vbv);
+    s->cmdList->DrawInstanced(count, 1, 0, 0);
+}
+
 void d3d12_destroy(RhiInstance* r) {
     D3d12Instance* s = self(r);
     if (!s) return;
@@ -235,6 +331,7 @@ const RhiOps kOps = {
     d3d12_beginFrame,
     d3d12_endFrame,
     d3d12_clear,
+    d3d12_drawColored,
 };
 
 bool pickAdapter(IDXGIFactory4* factory, ComPtr<IDXGIAdapter1>& out) {
