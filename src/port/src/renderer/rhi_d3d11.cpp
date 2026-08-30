@@ -20,6 +20,8 @@ namespace {
 struct D3d11Swapchain {
     ComPtr<IDXGISwapChain1>        swap;
     ComPtr<ID3D11RenderTargetView> rtv;
+    ComPtr<ID3D11Texture2D>        depthTex;
+    ComPtr<ID3D11DepthStencilView> dsv;
     int  w = 0, h = 0;
     bool vsync = true;
 };
@@ -50,6 +52,7 @@ struct D3d11Instance {
     ComPtr<ID3D11BlendState>     blend;
     ComPtr<ID3D11RasterizerState> raster;
     ComPtr<ID3D11DepthStencilState> depthOff;
+    ComPtr<ID3D11DepthStencilState> depthOn;
     ComPtr<ID3D11Buffer>         dynVB;
     UINT                         dynVBCap = 0;
     ComPtr<ID3D11Buffer>         cbXform; // 4x4 MVP (row-major)
@@ -62,7 +65,17 @@ D3d11Instance* self(RhiInstance* r) { return reinterpret_cast<D3d11Instance*>(r)
 bool makeRTV(D3d11Instance* s, D3d11Swapchain* sc) {
     ComPtr<ID3D11Texture2D> backbuf;
     if (FAILED(sc->swap->GetBuffer(0, IID_PPV_ARGS(&backbuf)))) return false;
-    return SUCCEEDED(s->device->CreateRenderTargetView(backbuf.Get(), nullptr, &sc->rtv));
+    if (FAILED(s->device->CreateRenderTargetView(backbuf.Get(), nullptr, &sc->rtv))) return false;
+
+    // Depth buffer matching the swapchain.
+    sc->dsv.Reset(); sc->depthTex.Reset();
+    D3D11_TEXTURE2D_DESC dd = {};
+    dd.Width = (UINT)sc->w; dd.Height = (UINT)sc->h; dd.MipLevels = 1; dd.ArraySize = 1;
+    dd.Format = DXGI_FORMAT_D32_FLOAT; dd.SampleDesc.Count = 1;
+    dd.Usage = D3D11_USAGE_DEFAULT; dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    if (FAILED(s->device->CreateTexture2D(&dd, nullptr, &sc->depthTex))) return false;
+    if (FAILED(s->device->CreateDepthStencilView(sc->depthTex.Get(), nullptr, &sc->dsv))) return false;
+    return true;
 }
 
 RhiSwapchain* d3d11_swapchainCreate(RhiInstance* r, void* windowHandle, int w, int h, bool vsync) {
@@ -126,7 +139,8 @@ void d3d11_beginFrame(RhiInstance* r) {
     D3d11Instance* s = self(r);
     if (!s->active || !s->active->rtv) return;
     ID3D11RenderTargetView* rtv = s->active->rtv.Get();
-    s->ctx->OMSetRenderTargets(1, &rtv, nullptr);
+    s->ctx->OMSetRenderTargets(1, &rtv, s->active->dsv.Get());
+    if (s->active->dsv) s->ctx->ClearDepthStencilView(s->active->dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
     D3D11_VIEWPORT vp = {};
     vp.Width  = (FLOAT)s->active->w;
     vp.Height = (FLOAT)s->active->h;
@@ -179,9 +193,14 @@ bool buildPipeline(D3d11Instance* s) {
     rd.CullMode = D3D11_CULL_NONE;   // GX cull handled later; draw everything for now
     s->device->CreateRasterizerState(&rd, &s->raster);
 
-    D3D11_DEPTH_STENCIL_DESC dd = {}; // no depth buffer bound yet
+    D3D11_DEPTH_STENCIL_DESC dd = {};
     dd.DepthEnable = FALSE;
     s->device->CreateDepthStencilState(&dd, &s->depthOff);
+    D3D11_DEPTH_STENCIL_DESC don = {};
+    don.DepthEnable = TRUE;
+    don.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+    don.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
+    s->device->CreateDepthStencilState(&don, &s->depthOn);
 
     D3D11_BUFFER_DESC cbd = {};
     cbd.ByteWidth = 16 * sizeof(float);
@@ -307,7 +326,7 @@ void d3d11_drawTextured(RhiInstance* r, const RhiTexVertex* verts, uint32_t coun
     s->ctx->PSSetSamplers(0, 1, &samp);
     const float bf[4] = {0,0,0,0};
     s->ctx->OMSetBlendState(s->blend.Get(), bf, 0xffffffff);
-    s->ctx->OMSetDepthStencilState(s->depthOff.Get(), 0);
+    s->ctx->OMSetDepthStencilState(s->depthOn.Get(), 0);
     s->ctx->RSSetState(s->raster.Get());
     s->ctx->Draw(count, 0);
 }
@@ -352,7 +371,7 @@ void d3d11_drawColored(RhiInstance* r, const RhiColorVertex* verts, uint32_t cou
     s->ctx->PSSetShader(s->ps.Get(), nullptr, 0);
     const float bf[4] = {0,0,0,0};
     s->ctx->OMSetBlendState(s->blend.Get(), bf, 0xffffffff);
-    s->ctx->OMSetDepthStencilState(s->depthOff.Get(), 0);
+    s->ctx->OMSetDepthStencilState(s->depthOn.Get(), 0);
     s->ctx->RSSetState(s->raster.Get());
     s->ctx->Draw(count, 0);
 }

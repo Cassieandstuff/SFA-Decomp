@@ -33,6 +33,9 @@ struct D3d12Swapchain {
     ComPtr<ID3D12Fence> fence;
     UINT64              fenceValue = 0;
     HANDLE              fenceEvent = nullptr;
+
+    ComPtr<ID3D12Resource>       depth;
+    ComPtr<ID3D12DescriptorHeap> dsvHeap;
 };
 
 struct D3d12Texture {
@@ -107,6 +110,26 @@ bool makeTargets(D3d12Instance* s, D3d12Swapchain* sc) {
         h.ptr += sc->rtvDescSize;
     }
     sc->frameIndex = sc->swap->GetCurrentBackBufferIndex();
+
+    // Depth buffer (D32_FLOAT) + a 1-entry DSV heap.
+    if (!sc->dsvHeap) {
+        D3D12_DESCRIPTOR_HEAP_DESC dhd = {};
+        dhd.NumDescriptors = 1; dhd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+        if (FAILED(s->device->CreateDescriptorHeap(&dhd, IID_PPV_ARGS(&sc->dsvHeap)))) return false;
+    }
+    sc->depth.Reset();
+    D3D12_HEAP_PROPERTIES hp = {}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC dd = {};
+    dd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    dd.Width = (UINT)sc->w; dd.Height = (UINT)sc->h; dd.DepthOrArraySize = 1; dd.MipLevels = 1;
+    dd.Format = DXGI_FORMAT_D32_FLOAT; dd.SampleDesc.Count = 1;
+    dd.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+    D3D12_CLEAR_VALUE cv = {}; cv.Format = DXGI_FORMAT_D32_FLOAT; cv.DepthStencil.Depth = 1.0f;
+    if (FAILED(s->device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &dd,
+            D3D12_RESOURCE_STATE_DEPTH_WRITE, &cv, IID_PPV_ARGS(&sc->depth)))) return false;
+    D3D12_DEPTH_STENCIL_VIEW_DESC dsv = {};
+    dsv.Format = DXGI_FORMAT_D32_FLOAT; dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+    s->device->CreateDepthStencilView(sc->depth.Get(), &dsv, sc->dsvHeap->GetCPUDescriptorHandleForHeapStart());
     return true;
 }
 
@@ -200,7 +223,9 @@ void d3d12_beginFrame(RhiInstance* r) {
     barrier(s->cmdList.Get(), sc->renderTargets[sc->frameIndex].Get(),
             D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
     D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtvHandle(sc);
-    s->cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv = sc->dsvHeap->GetCPUDescriptorHandleForHeapStart();
+    s->cmdList->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
+    s->cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
     D3D12_VIEWPORT vp = {}; vp.Width = (FLOAT)sc->w; vp.Height = (FLOAT)sc->h; vp.MaxDepth = 1.0f;
     D3D12_RECT     rc = {}; rc.right = sc->w; rc.bottom = sc->h;
@@ -286,13 +311,15 @@ bool buildPipeline12(D3d12Instance* s) {
     pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     pd.RasterizerState.DepthClipEnable = TRUE;
     pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    pd.DepthStencilState.DepthEnable = FALSE;
+    pd.DepthStencilState.DepthEnable = TRUE;
+    pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    pd.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
     pd.DepthStencilState.StencilEnable = FALSE;
     pd.SampleMask = UINT_MAX;
     pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     pd.NumRenderTargets = 1;
     pd.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-    pd.DSVFormat = DXGI_FORMAT_UNKNOWN;
+    pd.DSVFormat = DXGI_FORMAT_D32_FLOAT;
     pd.SampleDesc.Count = 1;
     if (FAILED(s->device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&s->pso)))) return false;
 
@@ -413,12 +440,14 @@ bool buildTexPipeline12(D3d12Instance* s) {
     pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     pd.RasterizerState.DepthClipEnable = TRUE;
     pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    pd.DepthStencilState.DepthEnable = FALSE;
+    pd.DepthStencilState.DepthEnable = TRUE;
+    pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    pd.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
     pd.SampleMask = UINT_MAX;
     pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     pd.NumRenderTargets = 1;
     pd.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-    pd.DSVFormat = DXGI_FORMAT_UNKNOWN;
+    pd.DSVFormat = DXGI_FORMAT_D32_FLOAT;
     pd.SampleDesc.Count = 1;
     if (FAILED(s->device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&s->psoTex)))) return false;
 
