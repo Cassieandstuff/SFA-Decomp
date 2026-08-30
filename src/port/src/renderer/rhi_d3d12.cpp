@@ -35,6 +35,11 @@ struct D3d12Swapchain {
     HANDLE              fenceEvent = nullptr;
 };
 
+struct D3d12Texture {
+    ComPtr<ID3D12Resource>      res;
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu = {};
+};
+
 struct D3d12Instance {
     RhiInstance                        base;
     ComPtr<IDXGIFactory4>              factory;
@@ -51,6 +56,16 @@ struct D3d12Instance {
     UINT                        uploadCap = 0;
     float                       mvp[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     bool                        pipelineReady = false;
+
+    // Textured pipeline + SRV heap.
+    ComPtr<ID3D12RootSignature>  rootSigTex;
+    ComPtr<ID3D12PipelineState>  psoTex;
+    ComPtr<ID3D12DescriptorHeap> srvHeap;  // shader-visible CBV_SRV_UAV
+    UINT                         srvDescSize = 0;
+    UINT                         srvNext = 0;
+    bool                         texPipelineReady = false;
+    D3D12_GPU_DESCRIPTOR_HANDLE  curTexGpu = {};
+    bool                         curTexValid = false;
 };
 
 D3d12Instance* self(RhiInstance* r) { return reinterpret_cast<D3d12Instance*>(r); }
@@ -327,6 +342,221 @@ void d3d12_setColorTransform(RhiInstance* r, const float m[16]) {
     memcpy(self(r)->mvp, m, 16 * sizeof(float));
 }
 
+static const char* kTexHLSL12 =
+    "cbuffer Xform : register(b0) { float4 uRows[4]; };\n"
+    "Texture2D uTex : register(t0);\n"
+    "SamplerState uSamp : register(s0);\n"
+    "struct VSIn  { float3 pos : POSITION; float4 col : COLOR; float2 uv : TEXCOORD; };\n"
+    "struct VSOut { float4 pos : SV_Position; float4 col : COLOR; float2 uv : TEXCOORD; };\n"
+    "VSOut vsmain(VSIn i){ float4 p = float4(i.pos,1.0); VSOut o;\n"
+    "  o.pos = float4(dot(uRows[0],p), dot(uRows[1],p), dot(uRows[2],p), dot(uRows[3],p));\n"
+    "  o.col = i.col; o.uv = i.uv; return o; }\n"
+    "float4 psmain(VSOut i) : SV_Target { return i.col * uTex.Sample(uSamp, i.uv); }\n";
+
+bool buildTexPipeline12(D3d12Instance* s) {
+    if (s->texPipelineReady) return true;
+
+    D3D12_DESCRIPTOR_HEAP_DESC hd = {};
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    hd.NumDescriptors = 256;
+    hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(s->device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&s->srvHeap)))) return false;
+    s->srvDescSize = s->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+    D3D12_DESCRIPTOR_RANGE srvRange = {};
+    srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srvRange.NumDescriptors = 1;
+    srvRange.BaseShaderRegister = 0; // t0
+
+    D3D12_ROOT_PARAMETER params[2] = {};
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[0].Constants.ShaderRegister = 0; // b0
+    params[0].Constants.Num32BitValues = 16;
+    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[1].DescriptorTable.NumDescriptorRanges = 1;
+    params[1].DescriptorTable.pDescriptorRanges = &srvRange;
+    params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_STATIC_SAMPLER_DESC samp = {};
+    samp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    samp.MaxLOD = D3D12_FLOAT32_MAX;
+    samp.ShaderRegister = 0; // s0
+    samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_ROOT_SIGNATURE_DESC rsd = {};
+    rsd.NumParameters = 2;
+    rsd.pParameters = params;
+    rsd.NumStaticSamplers = 1;
+    rsd.pStaticSamplers = &samp;
+    rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+    ComPtr<ID3DBlob> sig, serr;
+    if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &serr))) return false;
+    if (FAILED(s->device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&s->rootSigTex)))) return false;
+
+    ComPtr<ID3DBlob> vsb, psb, cerr;
+    if (FAILED(D3DCompile(kTexHLSL12, strlen(kTexHLSL12), "tex", nullptr, nullptr, "vsmain", "vs_5_0", 0, 0, &vsb, &cerr))) return false;
+    if (FAILED(D3DCompile(kTexHLSL12, strlen(kTexHLSL12), "tex", nullptr, nullptr, "psmain", "ps_5_0", 0, 0, &psb, &cerr))) return false;
+
+    D3D12_INPUT_ELEMENT_DESC elems[] = {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "COLOR",    0, DXGI_FORMAT_R8G8B8A8_UNORM,  0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 16, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+    };
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd = {};
+    pd.pRootSignature = s->rootSigTex.Get();
+    pd.VS = { vsb->GetBufferPointer(), vsb->GetBufferSize() };
+    pd.PS = { psb->GetBufferPointer(), psb->GetBufferSize() };
+    pd.InputLayout = { elems, 3 };
+    pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pd.RasterizerState.DepthClipEnable = TRUE;
+    pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pd.DepthStencilState.DepthEnable = FALSE;
+    pd.SampleMask = UINT_MAX;
+    pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pd.NumRenderTargets = 1;
+    pd.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    pd.DSVFormat = DXGI_FORMAT_UNKNOWN;
+    pd.SampleDesc.Count = 1;
+    if (FAILED(s->device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&s->psoTex)))) return false;
+
+    s->texPipelineReady = true;
+    return true;
+}
+
+RhiTexture* d3d12_createTexture(RhiInstance* r, int w, int h, int mips, uint32_t fmt, const void* rgba8) {
+    (void)mips; (void)fmt;
+    D3d12Instance* s = self(r);
+    if (w <= 0 || h <= 0 || !rgba8) return nullptr;
+    if (!buildTexPipeline12(s)) return nullptr;
+
+    // Default-heap texture in COPY_DEST.
+    D3D12_HEAP_PROPERTIES defHeap = {}; defHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC td = {};
+    td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    td.Width = (UINT)w; td.Height = (UINT)h; td.DepthOrArraySize = 1; td.MipLevels = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    D3d12Texture* t = new D3d12Texture();
+    if (FAILED(s->device->CreateCommittedResource(&defHeap, D3D12_HEAP_FLAG_NONE, &td,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&t->res)))) { delete t; return nullptr; }
+
+    // Upload buffer sized to the copyable footprint.
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp = {};
+    UINT numRows = 0; UINT64 rowBytes = 0, total = 0;
+    s->device->GetCopyableFootprints(&td, 0, 1, 0, &fp, &numRows, &rowBytes, &total);
+
+    D3D12_HEAP_PROPERTIES upHeap = {}; upHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC bd = {};
+    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width = total; bd.Height = 1;
+    bd.DepthOrArraySize = 1; bd.MipLevels = 1; bd.Format = DXGI_FORMAT_UNKNOWN;
+    bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> upload;
+    if (FAILED(s->device->CreateCommittedResource(&upHeap, D3D12_HEAP_FLAG_NONE, &bd,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload)))) { delete t; return nullptr; }
+
+    uint8_t* map = nullptr;
+    D3D12_RANGE none = {0, 0};
+    upload->Map(0, &none, (void**)&map);
+    const uint8_t* src = (const uint8_t*)rgba8;
+    for (UINT y = 0; y < numRows; ++y)
+        memcpy(map + fp.Offset + (SIZE_T)y * fp.Footprint.RowPitch, src + (SIZE_T)y * w * 4, (SIZE_T)w * 4);
+    upload->Unmap(0, nullptr);
+
+    // One-shot copy on a temporary allocator/list + fence.
+    ComPtr<ID3D12CommandAllocator> alloc;
+    ComPtr<ID3D12GraphicsCommandList> list;
+    s->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc));
+    s->device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc.Get(), nullptr, IID_PPV_ARGS(&list));
+
+    D3D12_TEXTURE_COPY_LOCATION dstLoc = {}; dstLoc.pResource = t->res.Get();
+    dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dstLoc.SubresourceIndex = 0;
+    D3D12_TEXTURE_COPY_LOCATION srcLoc = {}; srcLoc.pResource = upload.Get();
+    srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; srcLoc.PlacedFootprint = fp;
+    list->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
+
+    D3D12_RESOURCE_BARRIER b = {};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource = t->res.Get();
+    b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    b.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    list->ResourceBarrier(1, &b);
+    list->Close();
+
+    ID3D12CommandList* lists[] = { list.Get() };
+    s->queue->ExecuteCommandLists(1, lists);
+    ComPtr<ID3D12Fence> fence;
+    s->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
+    HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    s->queue->Signal(fence.Get(), 1);
+    if (fence->GetCompletedValue() < 1) { fence->SetEventOnCompletion(1, ev); WaitForSingleObjectEx(ev, INFINITE, FALSE); }
+    CloseHandle(ev);
+
+    // SRV in the shader-visible heap.
+    UINT slot = s->srvNext++;
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu = s->srvHeap->GetCPUDescriptorHandleForHeapStart();
+    cpu.ptr += (SIZE_T)slot * s->srvDescSize;
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd = {};
+    sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sd.Texture2D.MipLevels = 1;
+    s->device->CreateShaderResourceView(t->res.Get(), &sd, cpu);
+    t->gpu = s->srvHeap->GetGPUDescriptorHandleForHeapStart();
+    t->gpu.ptr += (UINT64)slot * s->srvDescSize;
+    return reinterpret_cast<RhiTexture*>(t);
+}
+
+void d3d12_destroyTexture(RhiInstance* r, RhiTexture* h) { (void)r; delete reinterpret_cast<D3d12Texture*>(h); }
+
+void d3d12_setTexture(RhiInstance* r, int slot, RhiTexture* h) {
+    (void)slot;
+    D3d12Instance* s = self(r);
+    D3d12Texture* t = reinterpret_cast<D3d12Texture*>(h);
+    if (t) { s->curTexGpu = t->gpu; s->curTexValid = true; } else s->curTexValid = false;
+}
+
+void d3d12_drawTextured(RhiInstance* r, const RhiTexVertex* verts, uint32_t count) {
+    D3d12Instance* s = self(r);
+    if (!verts || count == 0 || !s->active || !s->curTexValid) return;
+    if (!buildTexPipeline12(s)) return;
+
+    const UINT stride = (UINT)sizeof(RhiTexVertex);
+    const UINT needed = stride * count;
+    if (needed > s->uploadCap) {
+        if (s->uploadVB) { s->uploadVB->Unmap(0, nullptr); s->uploadVB.Reset(); s->mappedVB = nullptr; }
+        D3D12_HEAP_PROPERTIES hp = {}; hp.Type = D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC rd = {};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; rd.Width = needed; rd.Height = 1;
+        rd.DepthOrArraySize = 1; rd.MipLevels = 1; rd.Format = DXGI_FORMAT_UNKNOWN;
+        rd.SampleDesc.Count = 1; rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if (FAILED(s->device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&s->uploadVB)))) return;
+        D3D12_RANGE none = {0, 0};
+        if (FAILED(s->uploadVB->Map(0, &none, &s->mappedVB))) { s->uploadVB.Reset(); return; }
+        s->uploadCap = needed;
+    }
+    memcpy(s->mappedVB, verts, needed);
+
+    D3D12_VERTEX_BUFFER_VIEW vbv = {};
+    vbv.BufferLocation = s->uploadVB->GetGPUVirtualAddress();
+    vbv.SizeInBytes = needed; vbv.StrideInBytes = stride;
+
+    ID3D12DescriptorHeap* heaps[] = { s->srvHeap.Get() };
+    s->cmdList->SetDescriptorHeaps(1, heaps);
+    s->cmdList->SetGraphicsRootSignature(s->rootSigTex.Get());
+    s->cmdList->SetGraphicsRoot32BitConstants(0, 16, s->mvp, 0);
+    s->cmdList->SetGraphicsRootDescriptorTable(1, s->curTexGpu);
+    s->cmdList->SetPipelineState(s->psoTex.Get());
+    s->cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    s->cmdList->IASetVertexBuffers(0, 1, &vbv);
+    s->cmdList->DrawInstanced(count, 1, 0, 0);
+}
+
 void d3d12_destroy(RhiInstance* r) {
     D3d12Instance* s = self(r);
     if (!s) return;
@@ -350,6 +580,10 @@ const RhiOps kOps = {
     d3d12_clear,
     d3d12_drawColored,
     d3d12_setColorTransform,
+    d3d12_createTexture,
+    d3d12_destroyTexture,
+    d3d12_setTexture,
+    d3d12_drawTextured,
 };
 
 bool pickAdapter(IDXGIFactory4* factory, ComPtr<IDXGIAdapter1>& out) {
