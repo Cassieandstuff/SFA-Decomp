@@ -42,6 +42,7 @@ static void sleep_ms(int ms) { Sleep((DWORD)ms); }
 static unsigned be16(const unsigned char* p){ return (p[0]<<8)|p[1]; }
 static int      s16be(const unsigned char* p){ int v=(p[0]<<8)|p[1]; return v>=0x8000?v-0x10000:v; }
 static unsigned be32(const unsigned char* p){ return (p[0]<<24)|(p[1]<<16)|(p[2]<<8)|p[3]; }
+static float f32be(const unsigned char* p){ union{unsigned u; float f;} x; x.u=be32(p); return x.f; }
 
 static RhiBackend parse_backend(const char* s){
     if(!s) return RHI_BACKEND_D3D11;
@@ -119,20 +120,25 @@ static void fpush(RhiColorVertex vv){
     gFlat[gNFlat++]=vv;
 }
 
-// emit context
+// emit context. Positions are stored raw (world = local + joint offset) and
+// normalized in a post-pass, since bind-pose offsets define the real bounds.
 static const unsigned char* gVtx; static const unsigned char* gTcs;
-static float gCtr[3], gScale;
-static void getPos(int idx, float o[3]){ const unsigned char* q=gVtx+idx*6;
-    o[0]=((float)s16be(q)-gCtr[0])*gScale; o[1]=((float)s16be(q+2)-gCtr[1])*gScale; o[2]=((float)s16be(q+4)-gCtr[2])*gScale; }
-static void emitTexTri(Group* g,int a,int b,int c,int ta,int tb,int tc){
-    int pi[3]={a,b,c}, ti[3]={ta,tb,tc}; float p[3][3];
-    for(int k=0;k<3;++k) getPos(pi[k],p[k]);
+#define MAX_JOINTS 512
+static float gOff[MAX_JOINTS][3]; static int gHaveJoints; static int gSlot[16];
+static void poseVert(int idx,int joint,float o[3]){
+    const unsigned char* q=gVtx+idx*6;
+    o[0]=(float)s16be(q); o[1]=(float)s16be(q+2); o[2]=(float)s16be(q+4);
+    if(gHaveJoints && joint>=0 && joint<MAX_JOINTS){ o[0]+=gOff[joint][0]; o[1]+=gOff[joint][1]; o[2]+=gOff[joint][2]; }
+}
+static void emitTexTri(Group* g,int a,int b,int c,int ta,int tb,int tc,int ja,int jb,int jc_){
+    int pi[3]={a,b,c}, ti[3]={ta,tb,tc}, ji[3]={ja,jb,jc_}; float p[3][3];
+    for(int k=0;k<3;++k) poseVert(pi[k],ji[k],p[k]);
     for(int k=0;k<3;++k){ float u=(float)s16be(gTcs+ti[k]*4)/128.0f, v=(float)s16be(gTcs+ti[k]*4+2)/128.0f;
         RhiTexVertex vv={p[k][0],p[k][1],p[k][2],0xFFFFFFFFu,u,v}; gpush(g,vv); }
 }
-static void emitFlatTri(int a,int b,int c){
-    int pi[3]={a,b,c}; float p[3][3];
-    for(int k=0;k<3;++k) getPos(pi[k],p[k]);
+static void emitFlatTri(int a,int b,int c,int ja,int jb,int jc_){
+    int pi[3]={a,b,c}, ji[3]={ja,jb,jc_}; float p[3][3];
+    for(int k=0;k<3;++k) poseVert(pi[k],ji[k],p[k]);
     float ux=p[1][0]-p[0][0],uy=p[1][1]-p[0][1],uz=p[1][2]-p[0][2];
     float vx=p[2][0]-p[0][0],vy=p[2][1]-p[0][1],vz=p[2][2]-p[0][2];
     float nx=uy*vz-uz*vy,ny=uz*vx-ux*vz,nz=ux*vy-uy*vx; float nl=sqrtf(nx*nx+ny*ny+nz*nz); if(nl<1e-6f)nl=1;
@@ -158,18 +164,22 @@ static int validateLayout(const unsigned char* dl,int dlSize,int posOff,int posS
 }
 
 // Parse a display list into groups, using an explicit layout (validated by caller).
+// hasJoints: read the leading PNMTXIDX byte per vertex and map slot->joint (gSlot).
 static void parseDL(const unsigned char* dl,int dlSize,int posOff,int posSz,
-                    int texOff,int texSz,int stride,int hasTex,Group* g){
+                    int texOff,int texSz,int stride,int hasTex,int hasJoints,Group* g){
     int p=0;
     while(p<dlSize){ unsigned op=dl[p]; if(op==0){++p;continue;} if((op&0x80)==0) break;
         int prim=op&0xf8; int cnt=be16(dl+p+1); p+=3;
-        int n=cnt>4096?4096:cnt; static int pidx[4096], tidx[4096];
+        int n=cnt>4096?4096:cnt; static int pidx[4096], tidx[4096], jidx[4096];
         for(int v=0;v<n;++v){
-            pidx[v]=(posSz==2)?be16(dl+p+v*stride+posOff):dl[p+v*stride+posOff];
-            tidx[v]=hasTex?((texSz==2)?be16(dl+p+v*stride+texOff):dl[p+v*stride+texOff]):0;
+            const unsigned char* vp=dl+p+v*stride;
+            pidx[v]=(posSz==2)?be16(vp+posOff):vp[posOff];
+            tidx[v]=hasTex?((texSz==2)?be16(vp+texOff):vp[texOff]):0;
+            jidx[v]=hasJoints?gSlot[(vp[0]/3)&15]:-1; // PNMTXIDX at vertex offset 0
         }
         p+=cnt*stride;
-        #define T(a,b,c) do{ if(hasTex&&g) emitTexTri(g,pidx[a],pidx[b],pidx[c],tidx[a],tidx[b],tidx[c]); else emitFlatTri(pidx[a],pidx[b],pidx[c]); }while(0)
+        #define T(a,b,c) do{ if(hasTex&&g) emitTexTri(g,pidx[a],pidx[b],pidx[c],tidx[a],tidx[b],tidx[c],jidx[a],jidx[b],jidx[c]); \
+                             else emitFlatTri(pidx[a],pidx[b],pidx[c],jidx[a],jidx[b],jidx[c]); }while(0)
         if(prim==0x90){ for(int v=0;v+3<=n;v+=3) T(v,v+1,v+2); }
         else if(prim==0x98){ for(int v=2;v<n;++v){ if(v&1) T(v-1,v-2,v); else T(v-2,v-1,v); } }
         else if(prim==0xa0){ for(int v=2;v<n;++v) T(0,v-1,v); }
@@ -255,11 +265,30 @@ int main(int argc, char** argv) {
     unsigned instrsOff=be32(m+0xD4); int instrBitLen=(int)be16(m+0xD8)<<3;
     int jc=M.jc;
 
-    // bbox normalize
-    float minb[3]={1e9f,1e9f,1e9f}, maxb[3]={-1e9f,-1e9f,-1e9f};
-    for(int i=0;i<M.vc;++i) for(int c=0;c<3;++c){ float v=(float)s16be(vtx+i*6+c*2); if(v<minb[c])minb[c]=v; if(v>maxb[c])maxb[c]=v; }
-    float ext=1e-6f; for(int c=0;c<3;++c){ gCtr[c]=(minb[c]+maxb[c])*0.5f; float e=maxb[c]-minb[c]; if(e>ext)ext=e; }
-    gScale=1.6f/ext; gVtx=vtx;
+    gVtx=vtx;
+    for(int i=0;i<16;++i) gSlot[i]=i; // default identity slot->joint
+
+    // Bind-pose joint offsets: worldPos = localPos + (accumHead - tail), where
+    // accumHead sums the bone head translations down the parent chain. Extra joints
+    // (jointCount..+extraJointCount) are translation-blends of two joints.
+    gHaveJoints=0;
+    unsigned jdOff=be32(m+0x3C); int jointCount=m[0xF3], extraCount=m[0xF4];
+    static float accum[MAX_JOINTS][3];
+    if(jointCount>0 && jointCount<=MAX_JOINTS && jdOff>0 && jdOff+(unsigned)jointCount*0x1c<=M.usize){
+        for(int j=0;j<jointCount;++j){
+            const unsigned char* b=m+jdOff+j*0x1c; int parent=(signed char)b[0];
+            float head[3],tail[3];
+            for(int c=0;c<3;++c){ head[c]=f32be(b+4+c*4); tail[c]=f32be(b+0x10+c*4); }
+            for(int c=0;c<3;++c){ accum[j][c]=head[c] + ((parent>=0&&parent<j)?accum[parent][c]:0.0f); gOff[j][c]=accum[j][c]-tail[c]; }
+        }
+        unsigned exOff=be32(m+0x54);
+        for(int i=0;i<extraCount && (jointCount+i)<MAX_JOINTS; ++i){
+            if(exOff+(unsigned)i*3+3>M.usize) break;
+            const unsigned char* e=m+exOff+i*3; int g0=e[0],g1=e[1]; float w=e[2]/4.0f, wi=1.0f-w;
+            if(g0<jointCount+i && g1<jointCount+i) for(int c=0;c<3;++c) gOff[jointCount+i][c]=w*gOff[g0][c]+wi*gOff[g1][c];
+        }
+        gHaveJoints=(jc>1);
+    }
 
     // Walk the render-instruction stream.
     Bits bs={ m+instrsOff, 0, instrBitLen };
@@ -285,7 +314,7 @@ int main(int argc, char** argv) {
                 clrP=0; if(curOp&&(curOp[0x40]&2)){ clrP=1; clrSz=readBits(&bs,1)?2:1; }
                 texSz=readBits(&bs,1)?2:1; layerCount=curOp?curOp[0x41]:0;
             } else if(op==4){
-                int cnt=readBits(&bs,4); for(int i=0;i<cnt;++i) readBits(&bs,8);
+                int cnt=readBits(&bs,4); for(int i=0;i<cnt;++i){ int mi=readBits(&bs,8); if(i<16) gSlot[i]=mi; }
             } else if(op==2){
                 int dlIdx=readBits(&bs,8);
                 if(dlIdx<M.dc){
@@ -301,11 +330,11 @@ int main(int argc, char** argv) {
                         int hasTex=(layerCount>0 && curTexId>=0 && tcValid);
                         Group* g = hasTex ? groupFor(curTexId) : NULL;
                         if(validateLayout(dl,dls,posOff,posSz,texOff,texSz,stride,M.vc,tcCount,hasTex)){
-                            parseDL(dl,dls,posOff,posSz,texOff,texSz,stride,hasTex,g);
+                            parseDL(dl,dls,posOff,posSz,texOff,texSz,stride,hasTex,jc>1,g);
                         } else {
                             int aPosOff,aPosSz,aTexOff,aTexSz,aStride;
                             int r=autoDetect(dl,dls,M.vc,tcCount,hasTex,&aPosOff,&aPosSz,&aTexOff,&aTexSz,&aStride);
-                            if(r>=1){ int at=(r==2); parseDL(dl,dls,aPosOff,aPosSz,aTexOff,aTexSz,aStride, at&&hasTex, at&&hasTex?g:NULL); }
+                            if(r>=1){ int at=(r==2); parseDL(dl,dls,aPosOff,aPosSz,aTexOff,aTexSz,aStride, at&&hasTex, 0, at&&hasTex?g:NULL); }
                         }
                     }
                 }
@@ -318,7 +347,18 @@ int main(int argc, char** argv) {
     if(totalTex==0 && gNFlat==0){
         for(int d=0; d<M.dc; ++d){ const unsigned char* de=m+M.dlOff+d*0x1c;
             unsigned dlo=be32(de+0); int dls=(int)be16(de+4); if(dlo==0||dlo+dls>M.usize) continue;
-            int a,b,c,dd,ee; if(autoDetect(m+dlo,dls,M.vc,tcCount,0,&a,&b,&c,&dd,&ee)) parseDL(m+dlo,dls,a,b,c,dd,ee,0,NULL); }
+            int a,b,c,dd,ee; if(autoDetect(m+dlo,dls,M.vc,tcCount,0,&a,&b,&c,&dd,&ee)) parseDL(m+dlo,dls,a,b,c,dd,ee,0,0,NULL); }
+    }
+    // Normalize all emitted (posed) world positions into the view.
+    { float mn[3]={1e9f,1e9f,1e9f}, mx[3]={-1e9f,-1e9f,-1e9f};
+      #define ACC(X,Y,Z) do{ if((X)<mn[0])mn[0]=(X); if((X)>mx[0])mx[0]=(X); if((Y)<mn[1])mn[1]=(Y); if((Y)>mx[1])mx[1]=(Y); if((Z)<mn[2])mn[2]=(Z); if((Z)>mx[2])mx[2]=(Z);}while(0)
+      for(int i=0;i<gNGroups;++i) for(int k=0;k<gGroups[i].n;++k){ RhiTexVertex* v=&gGroups[i].v[k]; ACC(v->x,v->y,v->z); }
+      for(int k=0;k<gNFlat;++k){ RhiColorVertex* v=&gFlat[k]; ACC(v->x,v->y,v->z); }
+      #undef ACC
+      float ctr[3],ext=1e-6f; for(int c=0;c<3;++c){ ctr[c]=(mn[c]+mx[c])*0.5f; float e=mx[c]-mn[c]; if(e>ext)ext=e; }
+      float sc=1.6f/ext;
+      for(int i=0;i<gNGroups;++i) for(int k=0;k<gGroups[i].n;++k){ RhiTexVertex* v=&gGroups[i].v[k]; v->x=(v->x-ctr[0])*sc; v->y=(v->y-ctr[1])*sc; v->z=(v->z-ctr[2])*sc; }
+      for(int k=0;k<gNFlat;++k){ RhiColorVertex* v=&gFlat[k]; v->x=(v->x-ctr[0])*sc; v->y=(v->y-ctr[1])*sc; v->z=(v->z-ctr[2])*sc; }
     }
     printf("[model] %d texture groups, %d flat tris\n", gNGroups, gNFlat/3);
 
