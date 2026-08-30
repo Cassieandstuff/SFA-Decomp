@@ -154,6 +154,10 @@ add_executable(tex_view src/tools/tex_view.c)
 target_include_directories(tex_view PRIVATE ${RHI_INCLUDE})
 target_link_libraries(tex_view PRIVATE stairfax_gx stairfax_dvd stairfax_platform)
 
+add_executable(model_view src/tools/model_view.c)
+target_include_directories(model_view PRIVATE ${RHI_INCLUDE})
+target_link_libraries(model_view PRIVATE stairfax_gx stairfax_dvd stairfax_platform)
+
 if(MSVC)
     target_compile_options(rhi_d3d11 PRIVATE /W3)
     target_compile_options(rhi_common PRIVATE /W3)
