@@ -83,8 +83,8 @@ add_library(stairfax_gx STATIC src/gx_shim.c src/tex_decode.c)
 target_include_directories(stairfax_gx PUBLIC ${RHI_INCLUDE})
 target_link_libraries(stairfax_gx PUBLIC rhi_common)
 
-# --- DVD/fileio shim (disc reads -> host filesystem) -----------------------
-add_library(stairfax_dvd STATIC src/dvd_shim.c)
+# --- DVD/fileio shim (disc reads -> host filesystem) + asset inflate --------
+add_library(stairfax_dvd STATIC src/dvd_shim.c src/stfx_inflate.c)
 target_include_directories(stairfax_dvd PUBLIC ${RHI_INCLUDE})
 
 # Include layout + defines for compiling GAME code (and shims that shadow dolphin
@@ -149,6 +149,10 @@ target_link_libraries(gx_smoketest PRIVATE stairfax_gx stairfax_platform)
 add_executable(gx_tex_smoketest src/tools/gx_tex_smoketest.c)
 target_include_directories(gx_tex_smoketest PRIVATE ${RHI_INCLUDE})
 target_link_libraries(gx_tex_smoketest PRIVATE stairfax_gx stairfax_platform)
+
+add_executable(tex_view src/tools/tex_view.c)
+target_include_directories(tex_view PRIVATE ${RHI_INCLUDE})
+target_link_libraries(tex_view PRIVATE stairfax_gx stairfax_dvd stairfax_platform)
 
 if(MSVC)
     target_compile_options(rhi_d3d11 PRIVATE /W3)
