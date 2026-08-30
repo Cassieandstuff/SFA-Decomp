@@ -53,6 +53,27 @@ static void makeGcRgba8(uint8_t* out, int W, int H) {
         }
 }
 
+static uint16_t pack565(int r5, int g6, int b5) {
+    return (uint16_t)(((r5 & 0x1f) << 11) | ((g6 & 0x3f) << 5) | (b5 & 0x1f));
+}
+// Author a CMPR texture: 8x8 tiles of four 4x4 DXT1 sub-blocks. Endpoints vary by
+// block position (red->yellow across x-ish, blue->cyan) and indices 0x1B give each
+// 4-px block a 4-color spread, so the result is a colorful blocky gradient.
+static void makeGcCmpr(uint8_t* out, int W, int H) {
+    int o = 0;
+    for (int ty = 0; ty < H; ty += 8)
+        for (int tx = 0; tx < W; tx += 8)
+            for (int sy = 0; sy < 2; ++sy)
+                for (int sx = 0; sx < 2; ++sx) {
+                    int bx = tx + sx * 4, by = ty + sy * 4;
+                    uint16_t c0 = pack565(31, by * 63 / (H - 1), 0);
+                    uint16_t c1 = pack565(0, bx * 63 / (W - 1), 31);
+                    out[o++] = (uint8_t)(c0 >> 8); out[o++] = (uint8_t)(c0 & 0xff);
+                    out[o++] = (uint8_t)(c1 >> 8); out[o++] = (uint8_t)(c1 & 0xff);
+                    out[o++] = 0x1B; out[o++] = 0x1B; out[o++] = 0x1B; out[o++] = 0x1B;
+                }
+}
+
 static RhiBackend parse_backend(const char* s) {
     if (!s) return RHI_BACKEND_D3D11;
     if (!strcmp(s,"vk")||!strcmp(s,"vulkan")) return RHI_BACKEND_VULKAN;
@@ -63,11 +84,12 @@ static RhiBackend parse_backend(const char* s) {
 
 int main(int argc, char** argv) {
     const char* gfx = "d3d11"; const char* capturePath = NULL;
-    int frames = 240, captureFrame = 30;
+    int frames = 240, captureFrame = 30, useCmpr = 0;
     for (int i = 1; i < argc; ++i) {
         if      (!strcmp(argv[i], "--gfx") && i+1 < argc)     gfx = argv[++i];
         else if (!strcmp(argv[i], "--capture") && i+1 < argc) capturePath = argv[++i];
         else if (!strcmp(argv[i], "--frames") && i+1 < argc)  frames = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--cmpr"))                  useCmpr = 1;
     }
 
     printf("[gxtex] decode self-test: %s\n", gxTexDecodeSelfTest() == 0 ? "PASS" : "FAIL");
@@ -89,12 +111,14 @@ int main(int argc, char** argv) {
     GXInit_host();
     printf("[gxtex] backend=%s\n", rhi_backendName(rhi_getBackend(rhi)));
 
-    // Procedural GC RGBA8 texture (64x64) + GX texture object.
+    // Procedural GC texture (64x64) + GX texture object: RGBA8 or CMPR.
     const int TW = 64, TH = 64;
     static uint8_t gcTex[64 * 64 * 4];
-    makeGcRgba8(gcTex, TW, TH);
+    int texFmt = useCmpr ? GX_TF_CMPR : GX_TF_RGBA8;
+    if (useCmpr) makeGcCmpr(gcTex, TW, TH); else makeGcRgba8(gcTex, TW, TH);
+    printf("[gxtex] texture format: %s\n", useCmpr ? "CMPR" : "RGBA8");
     GXTexObj tex;
-    GXInitTexObj(&tex, gcTex, (uint16_t)TW, (uint16_t)TH, GX_TF_RGBA8, 0, 0, 0);
+    GXInitTexObj(&tex, gcTex, (uint16_t)TW, (uint16_t)TH, texFmt, 0, 0, 0);
 
     int captured = 0;
     for (int f = 0; f < frames; ++f) {

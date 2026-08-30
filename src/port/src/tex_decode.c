@@ -81,9 +81,41 @@ uint8_t* gxTexDecode(int fmt, int w, int h, const uint8_t* src) {
             }
         return dst;
 
+    case GX_TF_CMPR: { // GC's DXT1 variant: 8x8 tiles of four 4x4 DXT1 sub-blocks
+        for (int ty = 0; ty < h; ty += 8)
+            for (int tx = 0; tx < w; tx += 8)
+                for (int sy = 0; sy < 2; ++sy)
+                    for (int sx = 0; sx < 2; ++sx) {
+                        // 8-byte DXT1 block: 2 big-endian RGB565 endpoints + 4 index bytes.
+                        uint16_t c0 = be16(s), c1 = be16(s + 2);
+                        uint8_t pr[4], pg[4], pb[4], pa[4];
+                        int r0 = x5(c0 >> 11), g0 = x6((c0 >> 5) & 0x3f), b0 = x5(c0 & 0x1f);
+                        int r1 = x5(c1 >> 11), g1 = x6((c1 >> 5) & 0x3f), b1 = x5(c1 & 0x1f);
+                        pr[0]=(uint8_t)r0; pg[0]=(uint8_t)g0; pb[0]=(uint8_t)b0; pa[0]=255;
+                        pr[1]=(uint8_t)r1; pg[1]=(uint8_t)g1; pb[1]=(uint8_t)b1; pa[1]=255;
+                        if (c0 > c1) {
+                            pr[2]=(uint8_t)((2*r0+r1)/3); pg[2]=(uint8_t)((2*g0+g1)/3); pb[2]=(uint8_t)((2*b0+b1)/3); pa[2]=255;
+                            pr[3]=(uint8_t)((r0+2*r1)/3); pg[3]=(uint8_t)((g0+2*g1)/3); pb[3]=(uint8_t)((b0+2*b1)/3); pa[3]=255;
+                        } else {
+                            pr[2]=(uint8_t)((r0+r1)/2); pg[2]=(uint8_t)((g0+g1)/2); pb[2]=(uint8_t)((b0+b1)/2); pa[2]=255;
+                            pr[3]=0; pg[3]=0; pb[3]=0; pa[3]=0; // 1-bit alpha: index 3 transparent
+                        }
+                        for (int row = 0; row < 4; ++row) {
+                            uint8_t bits = s[4 + row];
+                            for (int col = 0; col < 4; ++col) {
+                                int idx = (bits >> (6 - 2 * col)) & 3; // GC: MSB-first 2-bit pixels
+                                put(dst, w, h, tx + sx * 4 + col, ty + sy * 4 + row,
+                                    pr[idx], pg[idx], pb[idx], pa[idx]);
+                            }
+                        }
+                        s += 8;
+                    }
+        return dst;
+    }
+
     default:
         free(dst);
-        return NULL; // unsupported (I4/IA4/CMPR/palettized) - added later
+        return NULL; // unsupported (I4/IA4/palettized) - added later
     }
 }
 
@@ -110,6 +142,22 @@ int gxTexDecodeSelfTest(void) {
     ok = d[0] == 255 && d[1] == 255 && d[2] == 255 && d[3] == 255;
     free(d);
     if (!ok) return 4;
+
+    // CMPR: an 8x8 texture (4 sub-blocks of 8 bytes). Endpoints red/blue, indices
+    // 0x1B -> per row columns pick palette 0,1,2,3. Check pixel(0,0)=red,(1,0)=blue.
+    uint8_t cmpr[32];
+    for (int blk = 0; blk < 4; ++blk) {
+        uint8_t* p = cmpr + blk * 8;
+        p[0] = 0xF8; p[1] = 0x00; // c0 = RGB565 red (0xF800), big-endian
+        p[2] = 0x00; p[3] = 0x1F; // c1 = RGB565 blue (0x001F)
+        p[4] = p[5] = p[6] = p[7] = 0x1B;
+    }
+    d = gxTexDecode(GX_TF_CMPR, 8, 8, cmpr);
+    if (!d) return 5;
+    ok = d[0] == 255 && d[1] == 0 && d[2] == 0 &&                 // (0,0) red
+         d[4 + 0] == 0 && d[4 + 1] == 0 && d[4 + 2] == 255;       // (1,0) blue
+    free(d);
+    if (!ok) return 6;
 
     return 0;
 }
