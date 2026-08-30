@@ -91,6 +91,7 @@ struct VkApi {
     PFN_vkCmdSetScissor cmdSetScissor = nullptr;
     PFN_vkCmdDraw cmdDraw = nullptr;
     PFN_vkCmdPushConstants cmdPushConstants = nullptr;
+    PFN_vkCmdPipelineBarrier cmdPipelineBarrier = nullptr;
     PFN_vkCreateBuffer createBuffer = nullptr;
     PFN_vkDestroyBuffer destroyBuffer = nullptr;
     PFN_vkGetBufferMemoryRequirements getBufferMemoryRequirements = nullptr;
@@ -99,6 +100,22 @@ struct VkApi {
     PFN_vkBindBufferMemory bindBufferMemory = nullptr;
     PFN_vkMapMemory mapMemory = nullptr;
     PFN_vkUnmapMemory unmapMemory = nullptr;
+    // textures
+    PFN_vkCreateImage createImage = nullptr;
+    PFN_vkDestroyImage destroyImage = nullptr;
+    PFN_vkGetImageMemoryRequirements getImageMemoryRequirements = nullptr;
+    PFN_vkBindImageMemory bindImageMemory = nullptr;
+    PFN_vkCreateSampler createSampler = nullptr;
+    PFN_vkDestroySampler destroySampler = nullptr;
+    PFN_vkCreateDescriptorSetLayout createDescriptorSetLayout = nullptr;
+    PFN_vkDestroyDescriptorSetLayout destroyDescriptorSetLayout = nullptr;
+    PFN_vkCreateDescriptorPool createDescriptorPool = nullptr;
+    PFN_vkDestroyDescriptorPool destroyDescriptorPool = nullptr;
+    PFN_vkAllocateDescriptorSets allocateDescriptorSets = nullptr;
+    PFN_vkUpdateDescriptorSets updateDescriptorSets = nullptr;
+    PFN_vkCmdBindDescriptorSets cmdBindDescriptorSets = nullptr;
+    PFN_vkCmdCopyBufferToImage cmdCopyBufferToImage = nullptr;
+    PFN_vkFreeCommandBuffers freeCommandBuffers = nullptr;
 };
 
 struct VkSwap {
@@ -132,6 +149,15 @@ struct VkInst {
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     VkPipeline       pipeline       = VK_NULL_HANDLE;
 
+    // textured pipeline + descriptor plumbing
+    VkPipelineLayout      pipelineLayoutTex = VK_NULL_HANDLE;
+    VkPipeline            pipelineTex       = VK_NULL_HANDLE;
+    VkDescriptorSetLayout descSetLayout     = VK_NULL_HANDLE;
+    VkDescriptorPool      descPool          = VK_NULL_HANDLE;
+    VkSampler             sampler           = VK_NULL_HANDLE;
+    VkDescriptorSet       curDescSet        = VK_NULL_HANDLE;
+    bool                  texReady          = false;
+
     // per-frame dynamic vertex buffers
     VkBuffer         vbo[kFramesInFlight]       = {};
     VkDeviceMemory   vboMem[kFramesInFlight]    = {};
@@ -144,6 +170,13 @@ struct VkInst {
     bool      rpActive   = false;
     float     clearColor[4] = {0, 0, 0, 1};
     float     mvp[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1}; // row-major
+};
+
+struct VkTexture {
+    VkImage         image = VK_NULL_HANDLE;
+    VkDeviceMemory  mem   = VK_NULL_HANDLE;
+    VkImageView     view  = VK_NULL_HANDLE;
+    VkDescriptorSet set   = VK_NULL_HANDLE;
 };
 
 VkInst* self(RhiInstance* r) { return reinterpret_cast<VkInst*>(r); }
@@ -210,6 +243,22 @@ bool loadDeviceProcs(VkApi* api, VkDevice dev) {
     GDPA(cmdSetScissor, vkCmdSetScissor);
     GDPA(cmdDraw, vkCmdDraw);
     GDPA(cmdPushConstants, vkCmdPushConstants);
+    GDPA(cmdPipelineBarrier, vkCmdPipelineBarrier);
+    GDPA(createImage, vkCreateImage);
+    GDPA(destroyImage, vkDestroyImage);
+    GDPA(getImageMemoryRequirements, vkGetImageMemoryRequirements);
+    GDPA(bindImageMemory, vkBindImageMemory);
+    GDPA(createSampler, vkCreateSampler);
+    GDPA(destroySampler, vkDestroySampler);
+    GDPA(createDescriptorSetLayout, vkCreateDescriptorSetLayout);
+    GDPA(destroyDescriptorSetLayout, vkDestroyDescriptorSetLayout);
+    GDPA(createDescriptorPool, vkCreateDescriptorPool);
+    GDPA(destroyDescriptorPool, vkDestroyDescriptorPool);
+    GDPA(allocateDescriptorSets, vkAllocateDescriptorSets);
+    GDPA(updateDescriptorSets, vkUpdateDescriptorSets);
+    GDPA(cmdBindDescriptorSets, vkCmdBindDescriptorSets);
+    GDPA(cmdCopyBufferToImage, vkCmdCopyBufferToImage);
+    GDPA(freeCommandBuffers, vkFreeCommandBuffers);
     GDPA(createBuffer, vkCreateBuffer);
     GDPA(destroyBuffer, vkDestroyBuffer);
     GDPA(getBufferMemoryRequirements, vkGetBufferMemoryRequirements);
@@ -588,6 +637,272 @@ void vulkan_setColorTransform(RhiInstance* r, const float m[16]) {
     memcpy(self(r)->mvp, m, 16 * sizeof(float));
 }
 
+// --- textures --------------------------------------------------------------
+bool buildTexPipeline(VkInst* s) {
+    if (s->texReady) return true;
+    VkApi* api = &s->api;
+
+    VkSamplerCreateInfo sci = {};
+    sci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    sci.magFilter = VK_FILTER_LINEAR; sci.minFilter = VK_FILTER_LINEAR;
+    sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sci.maxLod = VK_LOD_CLAMP_NONE;
+    if (api->createSampler(s->device, &sci, nullptr, &s->sampler) != VK_SUCCESS) return false;
+
+    VkDescriptorSetLayoutBinding bind = {};
+    bind.binding = 0;
+    bind.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bind.descriptorCount = 1;
+    bind.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutCreateInfo dlci = {};
+    dlci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    dlci.bindingCount = 1; dlci.pBindings = &bind;
+    if (api->createDescriptorSetLayout(s->device, &dlci, nullptr, &s->descSetLayout) != VK_SUCCESS) return false;
+
+    VkDescriptorPoolSize psz = {};
+    psz.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    psz.descriptorCount = 256;
+    VkDescriptorPoolCreateInfo dpci = {};
+    dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    dpci.maxSets = 256; dpci.poolSizeCount = 1; dpci.pPoolSizes = &psz;
+    if (api->createDescriptorPool(s->device, &dpci, nullptr, &s->descPool) != VK_SUCCESS) return false;
+
+    VkPushConstantRange pcr = {};
+    pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT; pcr.size = 16 * sizeof(float);
+    VkPipelineLayoutCreateInfo lci = {};
+    lci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    lci.setLayoutCount = 1; lci.pSetLayouts = &s->descSetLayout;
+    lci.pushConstantRangeCount = 1; lci.pPushConstantRanges = &pcr;
+    if (api->createPipelineLayout(s->device, &lci, nullptr, &s->pipelineLayoutTex) != VK_SUCCESS) return false;
+
+    VkShaderModule vs = makeModule(s, kTexVertSpv, sizeof(kTexVertSpv));
+    VkShaderModule fs = makeModule(s, kTexFragSpv, sizeof(kTexFragSpv));
+    if (!vs || !fs) return false;
+
+    VkPipelineShaderStageCreateInfo stages[2] = {};
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT; stages[0].module = vs; stages[0].pName = "main";
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; stages[1].module = fs; stages[1].pName = "main";
+
+    VkVertexInputBindingDescription vbind = {};
+    vbind.binding = 0; vbind.stride = sizeof(RhiTexVertex); vbind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    VkVertexInputAttributeDescription attrs[3] = {};
+    attrs[0].location = 0; attrs[0].format = VK_FORMAT_R32G32B32_SFLOAT; attrs[0].offset = 0;
+    attrs[1].location = 1; attrs[1].format = VK_FORMAT_R8G8B8A8_UNORM;  attrs[1].offset = 12;
+    attrs[2].location = 2; attrs[2].format = VK_FORMAT_R32G32_SFLOAT;   attrs[2].offset = 16;
+
+    VkPipelineVertexInputStateCreateInfo vi = {};
+    vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vi.vertexBindingDescriptionCount = 1; vi.pVertexBindingDescriptions = &vbind;
+    vi.vertexAttributeDescriptionCount = 3; vi.pVertexAttributeDescriptions = attrs;
+
+    VkPipelineInputAssemblyStateCreateInfo ia = {};
+    ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo vp = {};
+    vp.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    vp.viewportCount = 1; vp.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rs = {};
+    rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE;
+    rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth = 1.0f;
+
+    VkPipelineMultisampleStateCreateInfo ms = {};
+    ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineColorBlendAttachmentState cba = {};
+    cba.colorWriteMask = 0xf;
+    VkPipelineColorBlendStateCreateInfo cb = {};
+    cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    cb.attachmentCount = 1; cb.pAttachments = &cba;
+
+    VkDynamicState dyn[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo ds = {};
+    ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    ds.dynamicStateCount = 2; ds.pDynamicStates = dyn;
+
+    VkGraphicsPipelineCreateInfo pci = {};
+    pci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pci.stageCount = 2; pci.pStages = stages;
+    pci.pVertexInputState = &vi; pci.pInputAssemblyState = &ia; pci.pViewportState = &vp;
+    pci.pRasterizationState = &rs; pci.pMultisampleState = &ms; pci.pColorBlendState = &cb;
+    pci.pDynamicState = &ds; pci.layout = s->pipelineLayoutTex; pci.renderPass = s->renderPass;
+
+    VkResult res = api->createGraphicsPipelines(s->device, VK_NULL_HANDLE, 1, &pci, nullptr, &s->pipelineTex);
+    api->destroyShaderModule(s->device, vs, nullptr);
+    api->destroyShaderModule(s->device, fs, nullptr);
+    s->texReady = (res == VK_SUCCESS);
+    return s->texReady;
+}
+
+static void imageBarrier(VkApi* api, VkCommandBuffer cmd, VkImage image,
+                         VkImageLayout oldL, VkImageLayout newL,
+                         VkAccessFlags srcA, VkAccessFlags dstA,
+                         VkPipelineStageFlags srcS, VkPipelineStageFlags dstS) {
+    VkImageMemoryBarrier b = {};
+    b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    b.srcAccessMask = srcA; b.dstAccessMask = dstA;
+    b.oldLayout = oldL; b.newLayout = newL;
+    b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = image;
+    b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    b.subresourceRange.levelCount = 1;
+    b.subresourceRange.layerCount = 1;
+    api->cmdPipelineBarrier(cmd, srcS, dstS, 0, 0, nullptr, 0, nullptr, 1, &b);
+}
+
+static void oneShotUpload(VkInst* s, VkImage image, VkBuffer staging, int w, int h) {
+    VkApi* api = &s->api;
+    VkCommandBufferAllocateInfo ai = {};
+    ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    ai.commandPool = s->cmdPool; ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ai.commandBufferCount = 1;
+    VkCommandBuffer cb = VK_NULL_HANDLE;
+    api->allocateCommandBuffers(s->device, &ai, &cb);
+    VkCommandBufferBeginInfo bi = {};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    api->beginCommandBuffer(cb, &bi);
+
+    imageBarrier(api, cb, image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+    VkBufferImageCopy region = {};
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.layerCount = 1;
+    region.imageExtent.width = (uint32_t)w; region.imageExtent.height = (uint32_t)h; region.imageExtent.depth = 1;
+    api->cmdCopyBufferToImage(cb, staging, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+    imageBarrier(api, cb, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                 VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    api->endCommandBuffer(cb);
+
+    VkSubmitInfo si = {};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1; si.pCommandBuffers = &cb;
+    api->queueSubmit(s->queue, 1, &si, VK_NULL_HANDLE);
+    api->deviceWaitIdle(s->device);
+    api->freeCommandBuffers(s->device, s->cmdPool, 1, &cb);
+}
+
+RhiTexture* vulkan_createTexture(RhiInstance* r, int w, int h, int mips, uint32_t fmt, const void* rgba8) {
+    (void)mips; (void)fmt;
+    VkInst* s = self(r);
+    VkApi* api = &s->api;
+    if (w <= 0 || h <= 0 || !rgba8) return nullptr;
+    if (!buildTexPipeline(s)) return nullptr;
+
+    VkTexture* t = new VkTexture();
+
+    VkImageCreateInfo ici = {};
+    ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ici.extent.width = (uint32_t)w; ici.extent.height = (uint32_t)h; ici.extent.depth = 1;
+    ici.mipLevels = 1; ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT; ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (api->createImage(s->device, &ici, nullptr, &t->image) != VK_SUCCESS) { delete t; return nullptr; }
+
+    VkMemoryRequirements mr = {};
+    api->getImageMemoryRequirements(s->device, t->image, &mr);
+    VkMemoryAllocateInfo mai = {};
+    mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    mai.allocationSize = mr.size;
+    mai.memoryTypeIndex = findMemoryType(s, mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (api->allocateMemory(s->device, &mai, nullptr, &t->mem) != VK_SUCCESS) { api->destroyImage(s->device, t->image, nullptr); delete t; return nullptr; }
+    api->bindImageMemory(s->device, t->image, t->mem, 0);
+
+    // staging buffer
+    uint32_t bytes = (uint32_t)w * h * 4;
+    VkBufferCreateInfo bci = {};
+    bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bci.size = bytes; bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT; bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VkBuffer staging = VK_NULL_HANDLE; VkDeviceMemory stagingMem = VK_NULL_HANDLE;
+    api->createBuffer(s->device, &bci, nullptr, &staging);
+    VkMemoryRequirements smr = {};
+    api->getBufferMemoryRequirements(s->device, staging, &smr);
+    VkMemoryAllocateInfo smai = {};
+    smai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO; smai.allocationSize = smr.size;
+    smai.memoryTypeIndex = findMemoryType(s, smr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    api->allocateMemory(s->device, &smai, nullptr, &stagingMem);
+    api->bindBufferMemory(s->device, staging, stagingMem, 0);
+    void* map = nullptr;
+    api->mapMemory(s->device, stagingMem, 0, bytes, 0, &map);
+    memcpy(map, rgba8, bytes);
+    api->unmapMemory(s->device, stagingMem);
+
+    oneShotUpload(s, t->image, staging, w, h);
+    api->destroyBuffer(s->device, staging, nullptr);
+    api->freeMemory(s->device, stagingMem, nullptr);
+
+    VkImageViewCreateInfo vci = {};
+    vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    vci.image = t->image; vci.viewType = VK_IMAGE_VIEW_TYPE_2D; vci.format = VK_FORMAT_R8G8B8A8_UNORM;
+    vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    vci.subresourceRange.levelCount = 1; vci.subresourceRange.layerCount = 1;
+    api->createImageView(s->device, &vci, nullptr, &t->view);
+
+    VkDescriptorSetAllocateInfo dsai = {};
+    dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    dsai.descriptorPool = s->descPool; dsai.descriptorSetCount = 1; dsai.pSetLayouts = &s->descSetLayout;
+    if (api->allocateDescriptorSets(s->device, &dsai, &t->set) != VK_SUCCESS) { delete t; return nullptr; }
+
+    VkDescriptorImageInfo dii = {};
+    dii.sampler = s->sampler; dii.imageView = t->view; dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet wds = {};
+    wds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    wds.dstSet = t->set; wds.dstBinding = 0; wds.descriptorCount = 1;
+    wds.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; wds.pImageInfo = &dii;
+    api->updateDescriptorSets(s->device, 1, &wds, 0, nullptr);
+
+    return reinterpret_cast<RhiTexture*>(t);
+}
+
+void vulkan_destroyTexture(RhiInstance* r, RhiTexture* h) {
+    VkInst* s = self(r);
+    VkTexture* t = reinterpret_cast<VkTexture*>(h);
+    if (!t) return;
+    s->api.deviceWaitIdle(s->device);
+    if (t->view)  s->api.destroyImageView(s->device, t->view, nullptr);
+    if (t->image) s->api.destroyImage(s->device, t->image, nullptr);
+    if (t->mem)   s->api.freeMemory(s->device, t->mem, nullptr);
+    delete t;
+}
+
+void vulkan_setTexture(RhiInstance* r, int slot, RhiTexture* h) {
+    (void)slot;
+    VkInst* s = self(r);
+    VkTexture* t = reinterpret_cast<VkTexture*>(h);
+    s->curDescSet = t ? t->set : VK_NULL_HANDLE;
+}
+
+void vulkan_drawTextured(RhiInstance* r, const RhiTexVertex* verts, uint32_t count) {
+    VkInst* s = self(r);
+    VkApi* api = &s->api;
+    if (!verts || count == 0 || !s->active || !s->pipelineTex || s->curDescSet == VK_NULL_HANDLE) return;
+    uint32_t fr = s->frame;
+    uint32_t needed = (uint32_t)sizeof(RhiTexVertex) * count;
+    ensureVbo(s, fr, needed);
+    if (!s->vboMapped[fr]) return;
+    memcpy(s->vboMapped[fr], verts, needed);
+
+    beginRenderPassIfNeeded(s);
+    api->cmdBindPipeline(s->cmd[fr], VK_PIPELINE_BIND_POINT_GRAPHICS, s->pipelineTex);
+    api->cmdPushConstants(s->cmd[fr], s->pipelineLayoutTex, VK_SHADER_STAGE_VERTEX_BIT, 0, 16 * sizeof(float), s->mvp);
+    api->cmdBindDescriptorSets(s->cmd[fr], VK_PIPELINE_BIND_POINT_GRAPHICS, s->pipelineLayoutTex, 0, 1, &s->curDescSet, 0, nullptr);
+    VkDeviceSize offset = 0;
+    api->cmdBindVertexBuffers(s->cmd[fr], 0, 1, &s->vbo[fr], &offset);
+    api->cmdDraw(s->cmd[fr], count, 1, 0, 0);
+}
+
 void vulkan_endFrame(RhiInstance* r) {
     VkInst* s = self(r);
     VkApi* api = &s->api;
@@ -639,6 +954,11 @@ void vulkan_destroy(RhiInstance* r) {
         if (s->vbo[i])    { api->unmapMemory(s->device, s->vboMem[i]); api->destroyBuffer(s->device, s->vbo[i], nullptr); }
         if (s->vboMem[i]) api->freeMemory(s->device, s->vboMem[i], nullptr);
     }
+    if (s->pipelineTex)       api->destroyPipeline(s->device, s->pipelineTex, nullptr);
+    if (s->pipelineLayoutTex) api->destroyPipelineLayout(s->device, s->pipelineLayoutTex, nullptr);
+    if (s->descPool)          api->destroyDescriptorPool(s->device, s->descPool, nullptr);
+    if (s->descSetLayout)     api->destroyDescriptorSetLayout(s->device, s->descSetLayout, nullptr);
+    if (s->sampler)           api->destroySampler(s->device, s->sampler, nullptr);
     if (s->pipeline)       api->destroyPipeline(s->device, s->pipeline, nullptr);
     if (s->pipelineLayout) api->destroyPipelineLayout(s->device, s->pipelineLayout, nullptr);
     if (s->renderPass)     api->destroyRenderPass(s->device, s->renderPass, nullptr);
@@ -666,6 +986,10 @@ const RhiOps kOps = {
     vulkan_clear,
     vulkan_drawColored,
     vulkan_setColorTransform,
+    vulkan_createTexture,
+    vulkan_destroyTexture,
+    vulkan_setTexture,
+    vulkan_drawTextured,
 };
 
 bool loadLoader(VkApi* api) {
