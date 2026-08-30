@@ -79,7 +79,7 @@ target_include_directories(stairfax_vi PUBLIC ${RHI_INCLUDE})
 target_link_libraries(stairfax_vi PUBLIC rhi_common stairfax_platform)
 
 # --- GX shim (GX -> RHI draw path) -----------------------------------------
-add_library(stairfax_gx STATIC src/gx_shim.c)
+add_library(stairfax_gx STATIC src/gx_shim.c src/tex_decode.c)
 target_include_directories(stairfax_gx PUBLIC ${RHI_INCLUDE})
 target_link_libraries(stairfax_gx PUBLIC rhi_common)
 
@@ -145,6 +145,10 @@ target_link_libraries(os_mm_smoketest PRIVATE stairfax_os)
 add_executable(gx_smoketest src/tools/gx_smoketest.c)
 target_include_directories(gx_smoketest PRIVATE ${RHI_INCLUDE})
 target_link_libraries(gx_smoketest PRIVATE stairfax_gx stairfax_platform)
+
+add_executable(gx_tex_smoketest src/tools/gx_tex_smoketest.c)
+target_include_directories(gx_tex_smoketest PRIVATE ${RHI_INCLUDE})
+target_link_libraries(gx_tex_smoketest PRIVATE stairfax_gx stairfax_platform)
 
 if(MSVC)
     target_compile_options(rhi_d3d11 PRIVATE /W3)

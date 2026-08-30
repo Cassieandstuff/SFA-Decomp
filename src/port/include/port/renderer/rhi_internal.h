@@ -34,6 +34,12 @@ typedef struct RhiOps {
     // Draw (first GX brick: immediate-mode colored triangles)
     void (*drawColored)(RhiInstance*, const RhiColorVertex*, uint32_t count);
     void (*setColorTransform)(RhiInstance*, const float m[16]); // row-major MVP
+
+    // Textures
+    RhiTexture* (*createTexture)(RhiInstance*, int w, int h, int mips, uint32_t fmt, const void* rgba8);
+    void        (*destroyTexture)(RhiInstance*, RhiTexture*);
+    void        (*setTexture)(RhiInstance*, int slot, RhiTexture*);
+    void        (*drawTextured)(RhiInstance*, const RhiTexVertex*, uint32_t count);
 } RhiOps;
 
 struct RhiInstance {

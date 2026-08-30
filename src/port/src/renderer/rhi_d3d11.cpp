@@ -24,11 +24,24 @@ struct D3d11Swapchain {
     bool vsync = true;
 };
 
+struct D3d11Texture {
+    ComPtr<ID3D11Texture2D>          tex;
+    ComPtr<ID3D11ShaderResourceView> srv;
+};
+
 struct D3d11Instance {
     RhiInstance                 base;
     ComPtr<ID3D11Device>        device;
     ComPtr<ID3D11DeviceContext> ctx;
     D3d11Swapchain*             active = nullptr;
+
+    // Textured pipeline (pos+color+uv, samples t0 * vertex color).
+    ComPtr<ID3D11VertexShader>   vsTex;
+    ComPtr<ID3D11PixelShader>    psTex;
+    ComPtr<ID3D11InputLayout>    layoutTex;
+    ComPtr<ID3D11SamplerState>   samp;
+    ID3D11ShaderResourceView*    curSRV = nullptr; // non-owning, currently bound
+    bool                         texPipelineReady = false;
 
     // Built-in position+color pipeline (created lazily on first drawColored).
     ComPtr<ID3D11VertexShader>   vs;
@@ -185,6 +198,120 @@ void d3d11_setColorTransform(RhiInstance* r, const float m[16]) {
     memcpy(self(r)->mvp, m, 16 * sizeof(float));
 }
 
+static const char* kTexHLSL =
+    "cbuffer Xform : register(b0) { float4 uRows[4]; };\n"
+    "Texture2D uTex : register(t0);\n"
+    "SamplerState uSamp : register(s0);\n"
+    "struct VSIn  { float3 pos : POSITION; float4 col : COLOR; float2 uv : TEXCOORD; };\n"
+    "struct VSOut { float4 pos : SV_Position; float4 col : COLOR; float2 uv : TEXCOORD; };\n"
+    "VSOut vsmain(VSIn i){ float4 p = float4(i.pos,1.0); VSOut o;\n"
+    "  o.pos = float4(dot(uRows[0],p), dot(uRows[1],p), dot(uRows[2],p), dot(uRows[3],p));\n"
+    "  o.col = i.col; o.uv = i.uv; return o; }\n"
+    "float4 psmain(VSOut i) : SV_Target { return i.col * uTex.Sample(uSamp, i.uv); }\n";
+
+bool buildTexPipeline(D3d11Instance* s) {
+    if (s->texPipelineReady) return true;
+    if (!buildPipeline(s)) return false; // ensures cbXform, blend, raster, depthOff exist
+
+    ComPtr<ID3DBlob> vsb, psb, err;
+    if (FAILED(D3DCompile(kTexHLSL, strlen(kTexHLSL), "tex", nullptr, nullptr, "vsmain", "vs_4_0", 0, 0, &vsb, &err))) return false;
+    if (FAILED(D3DCompile(kTexHLSL, strlen(kTexHLSL), "tex", nullptr, nullptr, "psmain", "ps_4_0", 0, 0, &psb, &err))) return false;
+    if (FAILED(s->device->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &s->vsTex))) return false;
+    if (FAILED(s->device->CreatePixelShader(psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &s->psTex))) return false;
+
+    D3D11_INPUT_ELEMENT_DESC elems[] = {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "COLOR",    0, DXGI_FORMAT_R8G8B8A8_UNORM,  0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+    };
+    if (FAILED(s->device->CreateInputLayout(elems, 3, vsb->GetBufferPointer(), vsb->GetBufferSize(), &s->layoutTex))) return false;
+
+    D3D11_SAMPLER_DESC sd = {};
+    sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+    sd.MaxLOD = D3D11_FLOAT32_MAX;
+    s->device->CreateSamplerState(&sd, &s->samp);
+
+    s->texPipelineReady = true;
+    return true;
+}
+
+RhiTexture* d3d11_createTexture(RhiInstance* r, int w, int h, int mips, uint32_t fmt, const void* rgba8) {
+    (void)mips; (void)fmt;
+    D3d11Instance* s = self(r);
+    if (w <= 0 || h <= 0) return nullptr;
+    D3d11Texture* t = new D3d11Texture();
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = (UINT)w; td.Height = (UINT)h; td.MipLevels = 1; td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_IMMUTABLE;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA sub = {};
+    sub.pSysMem = rgba8;
+    sub.SysMemPitch = (UINT)w * 4;
+    if (FAILED(s->device->CreateTexture2D(&td, &sub, &t->tex))) { delete t; return nullptr; }
+    if (FAILED(s->device->CreateShaderResourceView(t->tex.Get(), nullptr, &t->srv))) { delete t; return nullptr; }
+    return reinterpret_cast<RhiTexture*>(t);
+}
+
+void d3d11_destroyTexture(RhiInstance* r, RhiTexture* h) {
+    (void)r;
+    delete reinterpret_cast<D3d11Texture*>(h);
+}
+
+void d3d11_setTexture(RhiInstance* r, int slot, RhiTexture* h) {
+    (void)slot;
+    D3d11Instance* s = self(r);
+    D3d11Texture* t = reinterpret_cast<D3d11Texture*>(h);
+    s->curSRV = t ? t->srv.Get() : nullptr;
+}
+
+void d3d11_drawTextured(RhiInstance* r, const RhiTexVertex* verts, uint32_t count) {
+    D3d11Instance* s = self(r);
+    if (!verts || count == 0 || !s->active) return;
+    if (!buildTexPipeline(s)) return;
+
+    const UINT stride = (UINT)sizeof(RhiTexVertex);
+    const UINT needed = stride * count;
+    if (needed > s->dynVBCap) {
+        s->dynVB.Reset();
+        D3D11_BUFFER_DESC bd = {};
+        bd.ByteWidth = needed; bd.Usage = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags = D3D11_BIND_VERTEX_BUFFER; bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (FAILED(s->device->CreateBuffer(&bd, nullptr, &s->dynVB))) return;
+        s->dynVBCap = needed;
+    }
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    if (FAILED(s->ctx->Map(s->dynVB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
+    memcpy(mapped.pData, verts, needed);
+    s->ctx->Unmap(s->dynVB.Get(), 0);
+
+    D3D11_MAPPED_SUBRESOURCE cbm;
+    if (SUCCEEDED(s->ctx->Map(s->cbXform.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &cbm))) {
+        memcpy(cbm.pData, s->mvp, 16 * sizeof(float));
+        s->ctx->Unmap(s->cbXform.Get(), 0);
+    }
+
+    ID3D11Buffer* vb = s->dynVB.Get();
+    ID3D11Buffer* cb = s->cbXform.Get();
+    ID3D11SamplerState* samp = s->samp.Get();
+    UINT offset = 0;
+    s->ctx->IASetInputLayout(s->layoutTex.Get());
+    s->ctx->IASetVertexBuffers(0, 1, &vb, &stride, &offset);
+    s->ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    s->ctx->VSSetConstantBuffers(0, 1, &cb);
+    s->ctx->VSSetShader(s->vsTex.Get(), nullptr, 0);
+    s->ctx->PSSetShader(s->psTex.Get(), nullptr, 0);
+    s->ctx->PSSetShaderResources(0, 1, &s->curSRV);
+    s->ctx->PSSetSamplers(0, 1, &samp);
+    const float bf[4] = {0,0,0,0};
+    s->ctx->OMSetBlendState(s->blend.Get(), bf, 0xffffffff);
+    s->ctx->OMSetDepthStencilState(s->depthOff.Get(), 0);
+    s->ctx->RSSetState(s->raster.Get());
+    s->ctx->Draw(count, 0);
+}
+
 void d3d11_drawColored(RhiInstance* r, const RhiColorVertex* verts, uint32_t count) {
     D3d11Instance* s = self(r);
     if (!verts || count == 0 || !s->active) return;
@@ -249,6 +376,10 @@ const RhiOps kOps = {
     d3d11_clear,
     d3d11_drawColored,
     d3d11_setColorTransform,
+    d3d11_createTexture,
+    d3d11_destroyTexture,
+    d3d11_setTexture,
+    d3d11_drawTextured,
 };
 
 } // namespace

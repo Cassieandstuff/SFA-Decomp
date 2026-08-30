@@ -90,21 +90,28 @@ void rhi_drawColored(RhiInstance* r, const RhiColorVertex* verts, uint32_t count
 void rhi_setColorTransform(RhiInstance* r, const float m[16]) {
     if (r && r->ops && r->ops->setColorTransform) r->ops->setColorTransform(r, m);
 }
+void rhi_drawTextured(RhiInstance* r, const RhiTexVertex* verts, uint32_t count) {
+    if (r && r->ops && r->ops->drawTextured) r->ops->drawTextured(r, verts, count);
+}
 
 // --- Not yet implemented (this stage is window+clear only) -----------------
 // Declared in rhi.h; routed through ops once the draw/pipeline path lands.
 RhiTevKey    rhi_buildTevKey(void) { RhiTevKey k = {0}; return k; }
 RhiPipeline* rhi_getOrCreatePipeline(RhiInstance* r, RhiTevKey key) { (void)r; (void)key; return NULL; }
 RhiTexture*  rhi_createTexture(RhiInstance* r, int w, int h, int mip, uint32_t fmt, const void* d) {
-    (void)r; (void)w; (void)h; (void)mip; (void)fmt; (void)d; return NULL;
+    return (r && r->ops && r->ops->createTexture) ? r->ops->createTexture(r, w, h, mip, fmt, d) : NULL;
 }
-void         rhi_destroyTexture(RhiInstance* r, RhiTexture* t) { (void)r; (void)t; }
+void         rhi_destroyTexture(RhiInstance* r, RhiTexture* t) {
+    if (r && r->ops && r->ops->destroyTexture) r->ops->destroyTexture(r, t);
+}
 RhiBuffer*   rhi_createBuffer(RhiInstance* r, size_t s, const void* d, bool dyn) {
     (void)r; (void)s; (void)d; (void)dyn; return NULL;
 }
 void         rhi_destroyBuffer(RhiInstance* r, RhiBuffer* b) { (void)r; (void)b; }
 void         rhi_setPipeline(RhiInstance* r, RhiPipeline* p) { (void)r; (void)p; }
-void         rhi_setTexture(RhiInstance* r, int slot, RhiTexture* t) { (void)r; (void)slot; (void)t; }
+void         rhi_setTexture(RhiInstance* r, int slot, RhiTexture* t) {
+    if (r && r->ops && r->ops->setTexture) r->ops->setTexture(r, slot, t);
+}
 void         rhi_setVertexBuffer(RhiInstance* r, RhiBuffer* vb, size_t stride) { (void)r; (void)vb; (void)stride; }
 void         rhi_setIndexBuffer(RhiInstance* r, RhiBuffer* ib) { (void)r; (void)ib; }
 void         rhi_drawIndexed(RhiInstance* r, uint32_t n, uint32_t first) { (void)r; (void)n; (void)first; }

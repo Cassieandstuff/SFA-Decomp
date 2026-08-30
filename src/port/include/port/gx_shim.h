@@ -52,6 +52,20 @@ void GXLoadPosMtxImm(float mtx[3][4], uint32_t id);  // load 3x4 into matrix slo
 void GXSetCurrentMtx(uint32_t id);                    // select current pos matrix
 void GXSetProjection(float proj[4][4], int type);     // 4x4 projection
 
+// Textures. GXTexObj describes a GX-format texture; GXLoadTexObj decodes it to
+// RGBA8, uploads it to the RHI (cached in the obj), and binds it for drawing.
+typedef struct GXTexObj {
+    void*    data;
+    uint16_t width, height;
+    int      fmt;      // GX_TF_* (see tex_decode.h)
+    void*    rhiTex;   // cached RhiTexture* after first load
+} GXTexObj;
+enum { GX_TEXMAP0 = 0, GX_TEXMAP1 = 1, GX_TEXMAP2 = 2, GX_TEXMAP3 = 3 };
+
+void GXInitTexObj(GXTexObj* obj, void* data, uint16_t w, uint16_t h, int fmt,
+                  int wrapS, int wrapT, int mipmap);
+void GXLoadTexObj(GXTexObj* obj, int mapId);
+
 // Immediate mode.
 void GXBegin(uint8_t primitive, uint8_t vtxfmt, uint16_t nverts);
 void GXEnd(void);
@@ -59,6 +73,7 @@ void GXPosition3f32(float x, float y, float z);
 void GXPosition2f32(float x, float y);
 void GXColor1u32(uint32_t rgba);          // 0xRRGGBBAA
 void GXColor4u8(uint8_t r, uint8_t g, uint8_t b, uint8_t a);
+void GXTexCoord2f32(float s, float t);
 
 #ifdef __cplusplus
 }

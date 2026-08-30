@@ -86,7 +86,18 @@ void rhi_drawColored(RhiInstance* rhi, const RhiColorVertex* verts, uint32_t cou
 // Set the model-view-projection applied to subsequent rhi_drawColored vertices.
 // 16 floats, ROW-MAJOR: m[0..3] = row 0, etc. clip = M * (x,y,z,1). gx_shim passes
 // proj*posmtx here. Defaults to identity (clip-space passthrough) until set.
+// Applies to rhi_drawTextured as well.
 void rhi_setColorTransform(RhiInstance* rhi, const float m[16]);
+
+// Textured colored vertex + draw. Samples the texture bound via rhi_setTexture and
+// multiplies by the vertex color; uses the same MVP as rhi_drawColored. Data passed
+// to rhi_createTexture is linear RGBA8 (gx_shim decodes GX formats first).
+typedef struct RhiTexVertex {
+    float    x, y, z;
+    uint32_t rgba;   // memory byte order R,G,B,A
+    float    u, v;
+} RhiTexVertex;
+void rhi_drawTextured(RhiInstance* rhi, const RhiTexVertex* verts, uint32_t count);
 
 // Draw - called from gx_shim_submitFifo path (GXWGFifo emulation)
 void rhi_setPipeline(RhiInstance* rhi, RhiPipeline* pipe);
