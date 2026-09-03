@@ -136,6 +136,8 @@ void* stairfax_spawn_player(int seq, float x, float y, float z) {
     *(float*)(spawn + 8) = x; *(float*)(spawn + 0xC) = y; *(float*)(spawn + 0x10) = z;
     *(int*)(spawn + 0x14) = -1;
 
+    extern void* Obj_GetActiveModel(void* obj);
+    extern void  stairfax_bswap_model_moves(void* header);
     void* obj = 0;
     __try { obj = loadCharacter((short*)spawn, 1, -1, -1, 0, 0); }
     __except (playerFaultFilter(GetExceptionInformation())) {
@@ -143,6 +145,14 @@ void* stairfax_spawn_player(int seq, float x, float y, float z) {
         fprintf(stderr, "[player] loadCharacter FAULT code=0x%08lx addr=%p rva=0x%tx\n",
                 gPlayerFaultCode, gPlayerFaultAddr, (char*)gPlayerFaultAddr - (char*)hm);
         obj = 0;
+    }
+    // The move atlas loaded by ObjModel_Load is big-endian on disc; the real loaders don't swap it.
+    // Swap it to host order so the anim eval (modelAnimEvalChannels -> modelAnimBuildJointMatrices)
+    // reads valid offsets - same as the interim spawned-object path does.
+    if (obj) {
+        void* mdl = Obj_GetActiveModel(obj);
+        void* file = mdl ? *(void**)mdl : 0;
+        if (file) stairfax_bswap_model_moves(file);
     }
     fprintf(stderr, "[player] spawn seq=0x%x at (%.0f,%.0f,%.0f) -> %p\n", seq, x, y, z, obj);
     return obj;
@@ -166,9 +176,10 @@ void stairfax_render_player(void* obj, int move, float progress) {
             void* mdl = Obj_GetActiveModel(obj);
             void* file = mdl ? *(void**)mdl : 0;   // ObjModel.file @ offset 0
             if (file) *(unsigned short*)((char*)file + 2) |= 2;
-        } else {
-            // The player's ObjAnimComponent is the GameObject itself (anim at offset 0). Set a
-            // valid move so ObjModel_UpdateAnimMatrices/BuildAnimBlendTable read initialised state.
+        } else if (getenv("STAIRFAX_PLAYER_SETMOVE")) {
+            // The player's ObjAnimComponent is the GameObject itself (anim at offset 0). Setting a
+            // move is optional: ObjModel_LoadAnimData's modelAnimResetState already leaves a valid
+            // moveCacheSlot=0 state, so by default we rely on that and let UpdateAnimMatrices run.
             Object_ObjAnimSetMove(obj, move, progress, 0);
         }
         objRenderModel(obj);

@@ -15,11 +15,17 @@ float playerMapOffsetZ;
 // function stubs
 int AudioStream_StopAll(void) { return 0; }
 int ObjContact_RemoveObjectCallbacks(void) { return 0; }
-int ObjHitReact_InitState(void) { return 0; }
+// These run inside loadCharacter's allocation-layout section as `cursor = fn(..., cursor)`,
+// advancing a bump cursor within the object allocation. The hit/hitbox subsystems aren't ported,
+// but the stubs MUST return the cursor UNCHANGED (not 0) - returning 0 zeroed the cursor and made
+// every later sub-buffer (jointPoseData, textureSlots, hitVolumes...) a null/garbage pointer.
+int ObjHitReact_InitState(int romDefNo, void* bank, void* state, int cursor, void* anim) {
+    (void)romDefNo; (void)bank; (void)state; (void)anim; return cursor;   // cursor = 4th arg
+}
 int ObjHitReact_ResetActiveObjects(void) { return 0; }
 int ObjHitReact_UpdateResetObjects(void) { return 0; }
-int ObjHitbox_AllocRotatedBounds(void) { return 0; }
-int ObjHits_AllocObjectState(void) { return 0; }
+int ObjHitbox_AllocRotatedBounds(void* obj, int cursor) { (void)obj; return cursor; }
+int ObjHits_AllocObjectState(void* obj, int cursor) { (void)obj; return cursor; }
 int ObjHits_InitWorkBuffers(void) { return 0; }
 int ObjHits_ResetWorkBuffers(void) { return 0; }
 int ObjHits_TickPriorityHitCooldowns(void) { return 0; }
@@ -62,8 +68,9 @@ int playerDoHitDetection(void) { return 0; }
 int playerFree(void) { return 0; }
 int playerUpdate(void) { return 0; }
 int playerUpdateWhileTimeStopped(void) { return 0; }
-int setMatrixFromObjectTransposed(void) { return 0; }
-int shadowInit(void) { return 0; }
+// Also a loadCharacter allocation-cursor advancer (cursor = shadowInit(obj, cursor, 0)); shadows
+// aren't ported but the stub MUST return the cursor unchanged so later sub-buffers stay valid.
+int shadowInit(void* obj, int cursor, int flag) { (void)obj; (void)flag; return cursor; }
 int shadowVolumesSetDirty(void) { return 0; }
 int staffUpdateWhileTimeStopped(void) { return 0; }
 int trackTickDynamicSlotCooldowns(void) { return 0; }

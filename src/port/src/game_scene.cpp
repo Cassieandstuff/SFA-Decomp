@@ -277,8 +277,14 @@ static void decodeAtlas(uint8_t* a, float frameF, int moveIdx,
 // exactly what the port's gx_draw_setJointMatrices consumes. Delegates to decodeAtlas.
 extern "C" void modelAnimBuildJointMatrices(int* out, uint8_t* dst, void* work, uint8_t* jd,
                                             int jc, uint8_t* scratch, int flags, uint8_t mode) {
-    (void)out; (void)scratch; (void)flags; (void)mode;
-    if (!dst || !jd || jc <= 0 || jc > MAX_JOINTS) return;
+    (void)scratch; (void)flags; (void)mode;
+    if (!out || !jd || jc <= 0 || jc > MAX_JOINTS) return;
+    // The real caller (modelAnimEvalChannels) passes out = &mtxBuf, where mtxBuf holds the joint
+    // matrix BANK pointer (model->jointMatrices[bufferFlags&1]); the per-joint 3x4 matrices go into
+    // that bank at stride 0x40 (ObjModel_GetJointMatrix), NOT into dst (a 64-byte scratch). Writing
+    // them to dst overflowed the caller's stack Mtx.
+    uint8_t* bank = *(uint8_t**)out;
+    if (!bank) bank = dst;   // interim harness passes a large dst-backed bank; tolerate either
     uint8_t* mfd = *(uint8_t**)((uint8_t*)work + 0x34);   // moveFrameData
     float framePhase = *(float*)((uint8_t*)work + 0x04);
     if (!mfd) return;
@@ -288,7 +294,7 @@ extern "C" void modelAnimBuildJointMatrices(int* out, uint8_t* dst, void* work, 
             accum[j][c] = head + ((parent >= 0 && parent < j) ? accum[parent][c] : 0.0f); } }
     static float jmtx[MAX_JOINTS][3][4];
     decodeAtlas(mfd - 6, framePhase, -2, jd, jc, accum, jmtx);
-    for (int j = 0; j < jc; ++j) memcpy(dst + j*0x30, jmtx[j], 0x30);
+    for (int j = 0; j < jc; ++j) memcpy(bank + j*0x40, jmtx[j], 0x30);   // bank stride 0x40, 3x4 payload
 }
 
 struct Bits { const uint8_t* d; int pos; int bitLen; };

@@ -101,8 +101,15 @@ int mmGetRegionForPtr(u8* ptr)          { (void)ptr; return 0; }
 void mmSetTextureAllocationState(int s) { (void)s; }
 int printHeapStats(int mode)            { (void)mode; return 0; }
 
-// --- cache staging (host has no separate cache memory) ---------------------
-void* getCache(void)                              { return NULL; }
+// --- cache staging (host has no separate locked cache; use a real scratch buffer) ----
+// The GC locked-cache staging area. The model render path stages matrices here:
+// modelInitMtxs copies the joint bank to getCache()+0x2700, and renderOpMatrix/modelBuildPosNrmMtxs
+// read/write pos matrices at +0, normal/tex at +0x12C0. Must be a persistent, aligned buffer big
+// enough for +0x2700 + (jointCount+extra)*0x40 (~0x3000 for 36 joints); 0x8000 is ample.
+void* getCache(void) {
+    static _Alignas(32) unsigned char gCacheBuf[0x8000];
+    return gCacheBuf;
+}
 void  cacheQueueWait(int sync)                    { (void)sync; }
 void  copyToCache(void* dst, void* src, u32 n)    { if (dst && src) memcpy(dst, src, n); }
 void  memcpyToCache(void* dst, void* src, u32 n)  { if (dst && src) memcpy(dst, src, n); }

@@ -13,6 +13,8 @@
 // asinf/atan2f as inlines, which collide with the real symbols the game references extern.
 double atan2(double, double);
 double asin(double);
+double sin(double);
+double cos(double);
 
 static unsigned char gDummy[4096];   // zeroed; returned where real code may read fields
 
@@ -30,20 +32,47 @@ int   Camera_ClipToScreen(void) { return 0; }
 int   Camera_ProjectWorldPointWithOffset(void) { return 0; }
 void  Obj_TransformWorldPointToLocal(void) { }
 
-// --- math bridges (real) -----------------------------------------------------
-// Matrix_TransformPoint(m, in, out): out = m(3x4) * (in,1). setMatrixFromObjectPos: identity+trans.
-void Matrix_TransformPoint(const float* m, const float* in, float* out) {
-    float x=in[0], y=in[1], z=in[2];
-    out[0]=m[0]*x+m[1]*y+m[2]*z+m[3];
-    out[1]=m[4]*x+m[5]*y+m[6]*z+m[7];
-    out[2]=m[8]*x+m[9]*y+m[10]*z+m[11];
-}
-void setMatrixFromObjectPos(float* m, float x, float y, float z) {
-    m[0]=1;m[1]=0;m[2]=0;m[3]=x; m[4]=0;m[5]=1;m[6]=0;m[7]=y; m[8]=0;m[9]=0;m[10]=1;m[11]=z;
-}
+// --- math bridges ------------------------------------------------------------
+// setMatrixFromObjectPos / setMatrixFromObjectTransposed / Matrix_TransformPoint / getAngle are
+// the REAL vecmath.c (now compiled). Only atan2f_fast and asinf (which vecmath references but
+// doesn't define) are provided here.
 float atan2f_fast(float y, float x) { return (float)atan2((double)y, (double)x); }
 float asinf(float x) { return (float)asin((double)x); }
-int   getAngle(int x, int z) { return (int)(atan2((double)x,(double)z)/3.14159265*32768.0); }
+
+// Faithful reimpls of vecmath.c's object->matrix builders (compiling vecmath.c pulls a trig-helper
+// subtree; these are the same math). MatrixTransform overlays the GameObject anim: rotX/Y/Z s16 @
+// 0/2/4, scale f32 @0x08 (rootMotionScale), x/y/z f32 @0x0C/0x10/0x14. Angle: full circle = 65536.
+static void angleToVec2_port(unsigned short a, float* s, float* c) {
+    double rad = (double)(short)a * (3.14159265358979 * 2.0 / 65536.0);
+    *s = (float)sin(rad); *c = (float)cos(rad);
+}
+void setMatrixFromObjectPos(float* m, const void* xf) {
+    const unsigned char* t = (const unsigned char*)xf;
+    unsigned short rotX = *(const unsigned short*)(t + 0), rotY = *(const unsigned short*)(t + 2),
+                   rotZ = *(const unsigned short*)(t + 4);
+    float scale = *(const float*)(t + 0x08);
+    float x = *(const float*)(t + 0x0C), y = *(const float*)(t + 0x10), z = *(const float*)(t + 0x14);
+    float s0,c0,s1,c1,s2,c2;
+    angleToVec2_port(rotX, &s0, &c0); angleToVec2_port(rotY, &s1, &c1); angleToVec2_port(rotZ, &s2, &c2);
+    m[0]=scale*(s2*(s1*s0)+c2*c0); m[1]=scale*(s2*c1); m[2]=scale*(s2*(s1*c0)-c2*s0); m[3]=0;
+    m[4]=scale*(c2*(s1*s0)-s2*c0); m[5]=scale*(c2*c1); m[6]=scale*(c2*(s1*c0)+s2*s0); m[7]=0;
+    m[8]=scale*(c1*s0);            m[9]=-s1*scale;     m[10]=scale*(c1*c0);            m[11]=0;
+    m[12]=x; m[13]=y; m[14]=z; m[15]=1.0f;
+}
+void setMatrixFromObjectTransposed(void* obj, float* out) {
+    float m[16]; setMatrixFromObjectPos(m, obj);
+    out[0]=m[0]; out[1]=m[4]; out[2]=m[8];
+    out[4]=m[1]; out[5]=m[5]; out[6]=m[9];
+    out[8]=m[2]; out[9]=m[6]; out[10]=m[10];
+    out[3]=m[12]; out[7]=m[13]; out[11]=m[14];
+}
+// Real signatures (vecmath.c): Matrix_TransformPoint(m3x4, x,y,z, &ox,&oy,&oz); getAngle(y,x)->s16.
+void Matrix_TransformPoint(const float* m, float x, float y, float z, float* ox, float* oy, float* oz) {
+    *ox = m[0]*x + m[1]*y + m[2]*z  + m[3];
+    *oy = m[4]*x + m[5]*y + m[6]*z  + m[7];
+    *oz = m[8]*x + m[9]*y + m[10]*z + m[11];
+}
+int getAngle(float y, float x) { return (int)(short)(int)(atan2((double)y,(double)x) * (32768.0/3.14159265358979)); }
 
 // --- GX matrix/TEV/channel state: no-ops for untextured (RHI ignores TEV) -----
 // (GXLoadNrmMtxImm is real in gx_draw.c.)
