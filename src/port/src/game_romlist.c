@@ -26,6 +26,16 @@ static void* spawnGuarded(void* p, int mapId, int idx) {
     __except (EXCEPTION_EXECUTE_HANDLER) { return (void*)-1; }  // -1 = faulted/skipped
 }
 
+// Guarded full model load: ObjModel_Load runs modelLoadAnimations, which faults when the
+// current area lacks the model's ANIM data. Catch it and return NULL so the caller falls back
+// to the bind-pose-only loader. Used for spawned-object models (which want animations).
+extern void* ObjModel_Load(int id, int loadFlag, int* outSize);
+void* stairfax_objmodel_load_guarded(int fid) {
+    int sz = 0;
+    __try { return ObjModel_Load(-fid, 0, &sz); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return (void*)0; }
+}
+
 extern void loadAssetFileById(void* out, int fileId);
 extern int  getDataFileSize(int fileId);
 

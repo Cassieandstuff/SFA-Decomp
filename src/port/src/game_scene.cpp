@@ -106,6 +106,7 @@ void setupVtxFormats() {
 extern "C" { void* ObjModel_Load(int id, int loadFlag, int* outSize); int stairfax_model_scan(int want);
     void ObjModel_InitResourceCaches(void); void ObjModel_InitScratchBuffers(void);
     void* stairfax_model_load_static(int id);
+    void* stairfax_objmodel_load_guarded(int fid);   // full ObjModel_Load (anims), SEH-guarded
     void stairfax_bswap_model_moves(void* header);
     void stairfax_model_perdir(int on);   // viewer: resolve MODELS.tab per-dir (else root/global)
     int Object_ObjAnimSetMove(void* objAnimHandle, int moveId, float moveProgress, unsigned char flags);
@@ -746,6 +747,7 @@ extern "C" void sceneRender(int a, int b, int c, int d, int e, int f) {
     // Spawned romlist objects: draw each GameObject's model. STAIRFAX_SPAWN_GRID lays them
     // out compactly near the camera (visible together); otherwise at their world positions.
     if (getenv("STAIRFAX_SPAWN")) {
+        ensureModelCaches();   // so the full (animated) ObjModel_Load of object models works
         int grid = getenv("STAIRFAX_SPAWN_GRID") ? 1 : 0;
         int cols = 6, cell = 0;
         static int logged = 0;
@@ -762,10 +764,13 @@ extern "C" void sceneRender(int a, int b, int c, int d, int e, int f) {
             // render it at the object position, bypassing the DLL-gated bank. Cached by model id.
             if (!h && mcnt > 0 && mids && mids[0] > 0) {
                 static int   omId[512]; static uint8_t* omHdr[512]; static int nOm = 0;
-                int fid = mids[0]; uint8_t* mh = nullptr;
-                for (int k=0;k<nOm;++k) if (omId[k]==fid){ mh=omHdr[k]; break; }
-                if (!mh && nOm < 512) {
-                    mh = (uint8_t*)stairfax_model_load_static(-fid);   // bind-pose (skips anim load)
+                int fid = mids[0]; uint8_t* mh = nullptr; bool found = false;
+                for (int k=0;k<nOm;++k) if (omId[k]==fid){ mh=omHdr[k]; found=true; break; }
+                if (!found && nOm < 512) {
+                    // full load (with animations) where the area's ANIM data allows; else bind pose
+                    mh = (uint8_t*)stairfax_objmodel_load_guarded(fid);
+                    if (!mh) mh = (uint8_t*)stairfax_model_load_static(-fid);
+                    if (mh) stairfax_bswap_model_moves(mh);
                     omId[nOm]=fid; omHdr[nOm]=mh; ++nOm;
                 }
                 h = mh;
@@ -787,31 +792,27 @@ extern "C" void sceneRender(int a, int b, int c, int d, int e, int f) {
             } else {
                 dm.wx = *(float*)(o + 0x0C); dm.wy = *(float*)(o + 0x10); dm.wz = *(float*)(o + 0x14);
             }
-            // Real spawned-object animation: drive the object's own ObjAnimComponent (o) + ObjModel
-            // (om) through the full eval chain, exactly as the game does. STAIRFAX_SPAWN_ANIM=<move>.
+            // Spawned-object animation: drive the loaded model header through the real eval chain
+            // via a minimal harness (the object's own bank isn't populated - DLL-gated - so we use
+            // the header directly, exactly like the model viewer's eval-chain path). The move data
+            // is already host-swapped at load. Only animates models that actually loaded moves.
             const char* spawnAnim = getenv("STAIRFAX_SPAWN_ANIM");
             bool animated = false;
             if (spawnAnim) {
                 int mc = *(uint16_t*)(h + 0xEC);
                 uint8_t** md = *(uint8_t***)(h + 0x64);
                 int moveIdx = atoi(spawnAnim); if (moveIdx < 0 || moveIdx >= mc) moveIdx = 0;
-                if (mc > 0 && md) {
-                    // Byte-swap the move data once per unique model header (spawned models load BE).
-                    static uint8_t* swapped[256]; static int nSwapped = 0;
-                    bool seen = false; for (int k=0;k<nSwapped;++k) if (swapped[k]==h){seen=true;break;}
-                    if (!seen) { stairfax_bswap_model_moves(h); if(nSwapped<256) swapped[nSwapped++]=h; }
+                if (mc > 0 && md && md[moveIdx]) {
+                    static AnimHarness H; static uint8_t* hHdr = nullptr;
+                    if (hHdr != h) { harnessSetup(&H, h); hHdr = h; }
                     float speed = getenv("STAIRFAX_ANIM_SPEED") ? atof(getenv("STAIRFAX_ANIM_SPEED")) : 0.3f;
                     uint8_t* atl = md[moveIdx]; float flen = atl ? (float)atl[7] : 1.0f; if (flen < 1) flen = 1;
                     float progress = fmodf(gFrameCounter * speed, flen) / flen;
-                    void* st = *(void**)((uint8_t*)om + 0x30);   // ObjModel.activeState
-                    if (st) {
-                        Object_ObjAnimSetMove(o, moveIdx, progress, 0);   // o = GameObject = ObjAnimComponent
-                        *(uint16_t*)((uint8_t*)st + 0x58) = 0;            // eventCountdown -> single slot
-                        static float spawnDst[MAX_JOINTS][3][4];
-                        modelAnimEvalChannels((uint8_t*)spawnDst, om, st, progress, 0x7f);
-                        renderModel(dm, camView, spawnDst);
-                        animated = true;
-                    }
+                    Object_ObjAnimSetMove(H.objAnim, moveIdx, progress, 0);
+                    *(uint16_t*)(H.state + 0x58) = 0;   // eventCountdown -> single slot
+                    modelAnimEvalChannels((uint8_t*)H.dst, H.objModel, H.state, progress, 0x7f);
+                    renderModel(dm, camView, H.dst);
+                    animated = true;
                 }
             }
             if (!animated) renderModel(dm, camView);
