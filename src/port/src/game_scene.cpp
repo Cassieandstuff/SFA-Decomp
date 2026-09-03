@@ -109,6 +109,7 @@ extern "C" { void* ObjModel_Load(int id, int loadFlag, int* outSize); int stairf
     void* stairfax_objmodel_load_guarded(int fid);   // full ObjModel_Load (anims), SEH-guarded
     void stairfax_bswap_model_moves(void* header);
     void stairfax_model_perdir(int on);   // viewer: resolve MODELS.tab per-dir (else root/global)
+    int dvd_shim_findFile(const char* dir, const char* prefix, const char* suffix, char* out, int outSize);
     int Object_ObjAnimSetMove(void* objAnimHandle, int moveId, float moveProgress, unsigned char flags);
     void modelAnimEvalChannels(uint8_t* dst, void* model, void* channel, float blend, int flags);
     extern int* gModelAnimOffsetTable; }
@@ -500,13 +501,23 @@ static void renderModel(const DispModel& dm, const float camView[3][4],
 
 void loadScene() {
     gInited = true;
-    const char* dir = getenv("STAIRFAX_MAP_DIR"); if (!dir) dir = "desert";
+    // Terrain dir: STAIRFAX_MAP_DIR, else the model dir (so one dir setting drives both), else desert.
+    const char* dir = getenv("STAIRFAX_MAP_DIR");
+    if (!dir) dir = getenv("STAIRFAX_MODEL_DIR");
+    if (!dir) dir = "desert";
     const char* modenv = getenv("STAIRFAX_MAP_MOD");
-    int mod = modenv ? atoi(modenv) : 29;
 
     char tabPath[256], binPath[256];
-    snprintf(tabPath, sizeof tabPath, "%s/mod%d.tab", dir, mod);
-    snprintf(binPath, sizeof binPath, "%s/mod%d.zlb.bin", dir, mod);
+    if (modenv) {
+        int mod = atoi(modenv);
+        snprintf(tabPath, sizeof tabPath, "%s/mod%d.tab", dir, mod);
+        snprintf(binPath, sizeof binPath, "%s/mod%d.zlb.bin", dir, mod);
+    } else if (!dvd_shim_findFile(dir, "mod", ".zlb.bin", binPath, sizeof binPath) ||
+               !dvd_shim_findFile(dir, "mod", ".tab", tabPath, sizeof tabPath)) {
+        // no mod file in this dir - fall back to the desert default
+        snprintf(tabPath, sizeof tabPath, "desert/mod29.tab");
+        snprintf(binPath, sizeof binPath, "desert/mod29.zlb.bin");
+    }
     int tabSize=0, binSize=0;
     unsigned char* tab=(unsigned char*)loadFileByPath(tabPath,&tabSize,0);
     unsigned char* bin=(unsigned char*)loadFileByPath(binPath,&binSize,0);
@@ -517,7 +528,7 @@ void loadScene() {
         unsigned off=asset_mapBlockOffset(tab,tabSize,i); if(off==ASSET_NO_BLOCK||off==lastOff) continue; lastOff=off;
         Block b; if(asset_loadMapBlock(bin,binSize,tab,tabSize,i,&b.mb)) gBlocks.push_back(std::move(b));
     }
-    if (gBlocks.empty()) { fprintf(stderr,"[scene] no valid blocks in %s mod%d\n",dir,mod); gInitFailed=true; return; }
+    if (gBlocks.empty()) { fprintf(stderr,"[scene] no valid blocks in %s\n",binPath); gInitFailed=true; return; }
 
     int cols=(int)ceilf(sqrtf((float)gBlocks.size()));
     for (int i=0;i<(int)gBlocks.size();++i){ Placement pl; pl.block=i;
@@ -548,8 +559,8 @@ void loadScene() {
                     uint8_t* rgba=gxTexDecode(fmt,w,h,tbuf+io);
                     if(rgba){ blk.texCache[k]=rhi_createTexture(gRhi,w,h,1,(uint32_t)fmt,rgba); free(rgba); if(blk.texCache[k])texOK++; } } } }
     }
-    printf("[scene] %s mod%d: %zu blocks, %d/%d textures, worldR=%.0f\n",
-           dir, mod, gBlocks.size(), texOK, texTot, gWorldR);
+    printf("[scene] %s: %zu blocks, %d/%d textures, worldR=%.0f\n",
+           binPath, gBlocks.size(), texOK, texTot, gWorldR);
 }
 
 void updateCamera() {

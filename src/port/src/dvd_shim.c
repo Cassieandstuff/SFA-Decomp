@@ -215,6 +215,28 @@ void dvd_shim_shutdown(void) {
 }
 
 // --- disc introspection ----------------------------------------------------
+// Find the first ISO file whose basename starts with `prefix` and ends with `suffix`, optionally
+// under directory `dir` (case-insensitive). Writes the full path into out. Returns 1 on success.
+// Used to locate a map's mod<N>.zlb.bin without hardcoding the number per map.
+int dvd_shim_findFile(const char* dir, const char* prefix, const char* suffix, char* out, int outSize) {
+    if (!gIso.mounted) return 0;
+    size_t dl = dir ? strlen(dir) : 0, pl = strlen(prefix), sl = strlen(suffix);
+    for (int i = 0; i < gIso.count; ++i) {
+        const char* p = gIso.entries[i].path;
+        const char* base = p; for (const char* q = p; *q; ++q) if (*q=='/'||*q=='\\') base = q+1;
+        if (dir) { if ((size_t)(base - p) < dl+1) continue;
+            int ok = 1; for (size_t k=0;k<dl;++k){ char a=p[k],b=dir[k]; if(a>='A'&&a<='Z')a+=32; if(b>='A'&&b<='Z')b+=32; if(a!=b){ok=0;break;} }
+            if (!ok || (p[dl] != '/' && p[dl] != '\\')) continue; }
+        size_t bl = strlen(base);
+        if (bl < pl + sl) continue;
+        int ok = 1;
+        for (size_t k=0;k<pl;++k){ char a=base[k],b=prefix[k]; if(a>='A'&&a<='Z')a+=32; if(b>='A'&&b<='Z')b+=32; if(a!=b){ok=0;break;} }
+        if (ok) for (size_t k=0;k<sl;++k){ char a=base[bl-sl+k],b=suffix[k]; if(a>='A'&&a<='Z')a+=32; if(b>='A'&&b<='Z')b+=32; if(a!=b){ok=0;break;} }
+        if (ok) { snprintf(out, outSize, "%s", p); return 1; }
+    }
+    return 0;
+}
+
 int         dvd_shim_isIso(void)        { return gIso.mounted; }
 const char* dvd_shim_gameCode(void)     { return gIso.mounted ? gIso.gameCode : ""; }
 int         dvd_shim_fileCount(void)    { return gIso.count; }
