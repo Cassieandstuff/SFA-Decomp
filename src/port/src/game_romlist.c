@@ -176,15 +176,21 @@ void stairfax_render_player(void* obj, int move, float progress) {
     // display-list index (or trailing junk misread as a draw) is dropped instead of faulting
     // on a wild read. The real render path (objprint) sets GX_VA_POS to ObjModel.vtxBuf[buf]
     // (0x1c[(bufferFlags>>1)&1]); file->vertexCount (@0xE4) * 6 bytes bounds it.
+    // Which of the two double-buffered working vertex buffers the render binds to GX_VA_POS depends
+    // on ObjModel.bufferFlags, which the render path itself toggles - so bound BOTH so the index
+    // guard doesn't reject the live buffer (rejecting it left every POS at 0 -> mesh collapsed to
+    // its bone origins, i.e. the spike).
     {
         unsigned char* am = (unsigned char*)Obj_GetActiveModel(obj);
         if (am) {
-            unsigned buf = (*(unsigned short*)(am + 0x18) >> 1) & 1;   // ObjModel.bufferFlags
-            unsigned char* vtx = *(unsigned char**)(am + 0x1c + buf * 4);  // vtxBuf[buf]
-            unsigned char* file = *(unsigned char**)(am + 0);              // ObjModel.file
-            if (vtx && file) {
-                unsigned vc = *(unsigned short*)(file + 0xE4);             // vertexCount
-                gx_draw_setSourceBounds(vtx, vtx + (size_t)vc * 6);
+            unsigned char* v0 = *(unsigned char**)(am + 0x1c);       // vtxBuf[0]
+            unsigned char* v1 = *(unsigned char**)(am + 0x20);       // vtxBuf[1]
+            unsigned char* file = *(unsigned char**)(am + 0);
+            if (file && (v0 || v1)) {
+                unsigned vc = *(unsigned short*)(file + 0xE4);       // vertexCount
+                unsigned char* lo = v0, * hi = v1;
+                if (!lo || (v1 && v1 < v0)) { lo = v1; hi = v0; }
+                gx_draw_setSourceBounds(lo, hi + (size_t)vc * 6);
             }
         }
     }

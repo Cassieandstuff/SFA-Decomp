@@ -165,7 +165,19 @@ static void skinVertex(RhiTexVertex* v, int pnmtx, int havePnmtx) {
 
 // --- GX transform API ------------------------------------------------------
 void GXSetProjection(const f32 mtx[4][4], GXProjectionType type) { (void)type; memcpy(gProj, mtx, sizeof(float)*16); }
-void GXLoadPosMtxImm(const f32 mtx[3][4], u32 id) { u32 s = id/3; if (s < GX_MTX_SLOTS) memcpy(gPosMtx[s], mtx, sizeof(float)*12); }
+void GXLoadPosMtxImm(const f32 mtx[3][4], u32 id) {
+    u32 s = id/3;
+    if (s >= GX_MTX_SLOTS) return;
+    memcpy(gPosMtx[s], mtx, sizeof(float)*12);
+    // Safety on the skinned path: a NaN/inf or wildly out-of-range pos matrix (the not-yet-correct
+    // vertex-group / extra-joint blend can still produce one) would fling its verts across the
+    // screen. Push such a matrix's verts behind the far plane so they clip instead of spiking.
+    if (gRealSkin) {
+        float* M = &gPosMtx[s][0][0]; int bad = 0;
+        for (int k=0;k<12;++k){ float a = M[k]<0?-M[k]:M[k]; if (a>1e6f || a!=a){ bad=1; break; } }
+        if (bad) { for (int k=0;k<12;++k) M[k]=0; gPosMtx[s][2][3]=1e9f; }
+    }
+}
 void GXLoadNrmMtxImm(const f32 mtx[3][4], u32 id) { (void)mtx; (void)id; }  // normals unused in the untextured path
 void GXLoadTexMtxImm(const f32 mtx[][4], u32 id, GXTexMtxType type) { (void)mtx; (void)id; (void)type; }
 void GXSetCurrentMtx(u32 id) { u32 s = id/3; if (s < GX_MTX_SLOTS) gCurMtx = (int)s; }

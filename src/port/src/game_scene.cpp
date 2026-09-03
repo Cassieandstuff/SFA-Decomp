@@ -127,6 +127,8 @@ extern "C" { void* ObjModel_Load(int id, int loadFlag, int* outSize); int stairf
     int dvd_shim_findFile(const char* dir, const char* prefix, const char* suffix, char* out, int outSize);
     int Object_ObjAnimSetMove(void* objAnimHandle, int moveId, float moveProgress, unsigned char flags);
     void modelAnimEvalChannels(uint8_t* dst, void* model, void* channel, float blend, int flags);
+    void PSMTXConcat(const float* a, const float* b, float* ab);
+    void* getCache(void);
     extern int* gModelAnimOffsetTable; }
 
 // Minimal ObjModel/ObjAnimComponent/ObjAnimState harness wired to a model header, so the REAL
@@ -275,26 +277,133 @@ static void decodeAtlas(uint8_t* a, float frameF, int moveIdx,
 // Reads the ObjAnimState `work`: moveFrameData@0x34 (= atlas+6), framePhase@0x04. Produces the
 // per-joint 3x4 skinning matrices (M_j = A_j * T(-accum_j)) into `dst` (0x30 stride), which is
 // exactly what the port's gx_draw_setJointMatrices consumes. Delegates to decodeAtlas.
+// s16 slot angle -> radians (full circle = 65536), then the direct euler->3x4 rotation matrix
+// exactly as retail's non-blend build (.L_80007980): rows below are the retail store order.
+static void eulerMat34(int16_t a0s, int16_t a1s, int16_t a2s, const float head[3], float m[3][4]) {
+    const float k = 6.28318530718f / 65536.0f;
+    float c0=cosf(a0s*k), s0=sinf(a0s*k), c1=cosf(a1s*k), s1=sinf(a1s*k), c2=cosf(a2s*k), s2=sinf(a2s*k);
+    m[0][0]=c1*c2;              m[0][1]=s0*c2*s1 - c0*s2;  m[0][2]=c0*c2*s1 + s0*s2;  m[0][3]=head[0];
+    m[1][0]=c1*s2;              m[1][1]=s0*s2*s1 + c0*c2;  m[1][2]=c0*s2*s1 - s0*c2;  m[1][3]=head[1];
+    m[2][0]=-s1;               m[2][1]=s0*c1;             m[2][2]=c0*c1;             m[2][3]=head[2];
+}
+// Faithful port of the retail modelAnimBuildJointMatrices non-blend path (mode 0, eventCountdown<=0),
+// which is what a spawned character's steady render uses (verified: mode=0 flags=0x7f). Stages:
+//   1. decode this channel's packed keyframes into a per-slot buffer (.L_800074EC)
+//   2. add the base pose from the scratch fixup table (.L_800075FC, filled by BuildAnimBlendTable)
+//   3. per bone, build a local matrix from its idx-selected slot (.L_80007980) into bank[idx0&0x7f]
+//   4. forward kinematics: bank[bone] = bank[parent] * bank[bone]  (.L_80007D74)
+// ModelBone (stride 0x1c): parent s8@0, idx0 u8@1 (bank slot, & flags), idx1 u8@2 (rotation slot),
+// idx2 u8@3, head f32[3]@4 (BE on disc). Slot buffer: 0x40 stride, rot s16 @0/2/4, secondary @0xc..,
+// translation @0x18.. . Descriptors: moveFrameData[0]=slotCount, u16 descriptors from +4.
+#define ANIM_MAX_SLOTS 128
+static int16_t gAnimSlots[ANIM_MAX_SLOTS][0x20];   // 0x40 bytes = 0x20 s16 per slot
 extern "C" void modelAnimBuildJointMatrices(int* out, uint8_t* dst, void* work, uint8_t* jd,
                                             int jc, uint8_t* scratch, int flags, uint8_t mode) {
-    (void)scratch; (void)flags; (void)mode;
     if (!out || !jd || jc <= 0 || jc > MAX_JOINTS) return;
-    // The real caller (modelAnimEvalChannels) passes out = &mtxBuf, where mtxBuf holds the joint
-    // matrix BANK pointer (model->jointMatrices[bufferFlags&1]); the per-joint 3x4 matrices go into
-    // that bank at stride 0x40 (ObjModel_GetJointMatrix), NOT into dst (a 64-byte scratch). Writing
-    // them to dst overflowed the caller's stack Mtx.
-    uint8_t* bank = *(uint8_t**)out;
-    if (!bank) bank = dst;   // interim harness passes a large dst-backed bank; tolerate either
-    uint8_t* mfd = *(uint8_t**)((uint8_t*)work + 0x34);   // moveFrameData
+    uint8_t* bank = *(uint8_t**)out;               // model->jointMatrices[buf], stride 0x40
+    if (!bank) bank = dst;
+    // The render builds gPosMtx from getCache() pos-matrix slots (renderOpMatrix fills only slots
+    // 0..jointCount+extra); a render-op posMtx index past that reads a STALE slot from a prior
+    // object's render (seen as a ~1e27 matrix -> the player vertices shoot off). Reset the pos
+    // region to identity so any unrebuilt slot is inert instead of garbage. Region [0,0x2700) is
+    // the pos/normal matrices; the joint bank staged at +0x2700 is untouched.
+    if (uint8_t* cache = (uint8_t*)getCache()) {
+        for (int i = 0; i < 0x2700; i += 0x30) { float* M=(float*)(cache+i);
+            for (int k=0;k<12;++k) M[k]=0; M[0]=M[5]=M[10]=1.0f; }
+    }
+    // Clear every joint-bank slot to identity before decoding: a bone whose bank slot no bone
+    // writes (an idx gap), and the extra vertex-group slots that modelCalcVtxGroupMtxs blends
+    // from, must be inert instead of stale garbage (a stale slot rendered as a ~1e27 matrix ->
+    // spike). total = jointCount + extraJointCount from the model header.
+    int total = jc;
+    if (gPlayerObj) { uint8_t* am=(uint8_t*)Obj_GetActiveModel(gPlayerObj);
+        if (am) { uint8_t* file=*(uint8_t**)am; if (file) total = file[0xF3] + file[0xF4]; } }
+    if (total < jc || total > 200) total = jc;
+    for (int j = 0; j < total; ++j) { float* M=(float*)(bank+j*0x40);
+        for (int k=0;k<12;++k) M[k]=0; M[0]=M[5]=M[10]=1.0f; }
+    if (mode & 0x0C) return;                        // blend path not yet ported; leave bank as-is
+    uint8_t* mfd = *(uint8_t**)((uint8_t*)work + 0x34);   // moveFrameData (descriptors)
+    const uint8_t* cur = *(const uint8_t**)((uint8_t*)work + 0x2c);  // frame stream cursor
+    int16_t stride = *(int16_t*)((uint8_t*)work + 0x4c);            // frame stream stride (bytes)
     float framePhase = *(float*)((uint8_t*)work + 0x04);
     if (!mfd) return;
-    static float accum[MAX_JOINTS][3];
-    for (int j = 0; j < jc; ++j) { const uint8_t* b = jd + j*0x1c; int parent = (int8_t)b[0];
-        for (int c = 0; c < 3; ++c) { float head = mdlBEF32(b + 4 + c*4);
-            accum[j][c] = head + ((parent >= 0 && parent < j) ? accum[parent][c] : 0.0f); } }
-    static float jmtx[MAX_JOINTS][3][4];
-    decodeAtlas(mfd - 6, framePhase, -2, jd, jc, accum, jmtx);
-    for (int j = 0; j < jc; ++j) memcpy(bank + j*0x40, jmtx[j], 0x30);   // bank stride 0x40, 3x4 payload
+    const uint8_t* nxt = cur ? cur + stride : cur;
+    float frac = framePhase - floorf(framePhase); if (frac < 0) frac = 0; if (frac > 1) frac = 1;
+    int fracFixed = (int)(frac * 16384.0f);
+    int be = getenv("STAIRFAX_ANIM_BE") != 0;      // descriptor endianness probe
+
+    // Stage 1: decode N slots into gAnimSlots (cleared first so the base-pose fixup lands cleanly
+    // on un-animated slots, and un-decoded components stay identity/zero).
+    memset(gAnimSlots, 0, sizeof gAnimSlots);
+    int nSlots = mfd[0]; if (nSlots > ANIM_MAX_SLOTS) nSlots = ANIM_MAX_SLOTS;
+    const uint8_t* dp = mfd + 4;
+    int bitPos = 0;
+    auto rdDesc = [&]() -> unsigned { unsigned v = be ? ((dp[0]<<8)|dp[1]) : (dp[0]|(dp[1]<<8)); dp += 2; return v; };
+    auto sample = [&](int bw) -> int {
+        if (!cur) return 0;
+        int cv = (int)animReadBits(cur, bitPos, bw);
+        int nv = (int)animReadBits(nxt, bitPos, bw);
+        bitPos += bw;
+        return cv + (((((int)((unsigned)(nv - cv) << 18)) >> 18) * fracFixed) >> 14);
+    };
+    for (int s = 0; s < nSlots; ++s) {
+        int16_t* slot = gAnimSlots[s];
+        for (int c = 0; c < 3; ++c) {
+            unsigned d = rdDesc(); int bw = d & 0xf;
+            int val = (int16_t)(d & 0xfff0);
+            if (bw) val = (int16_t)(d & 0xfff0) + (sample(bw) << 2);   // primary: x4
+            slot[c] = (int16_t)val;                                    // rotation @ +0/+2/+4
+            if (d & 0x10) {                                            // secondary (scale) @ +0xc..
+                unsigned d2 = rdDesc(); int bw2 = d2 & 0xf;
+                int v2 = (int16_t)(d2 & 0xffc0);
+                if (bw2) v2 = (int16_t)(d2 & 0xffc0) + (sample(bw2) << 1);   // x2
+                slot[6 + c] = (int16_t)v2;
+                if (d2 & 0x20) {                                       // tertiary (translation) @ +0x18..
+                    unsigned d3 = rdDesc(); int bw3 = d3 & 0xf;
+                    int v3 = (int16_t)(d3 & 0xfff0);
+                    if (bw3) v3 = (int16_t)(d3 & 0xfff0) + sample(bw3);      // x1
+                    slot[12 + c] = (int16_t)v3;
+                }
+            }
+        }
+    }
+
+    // Stage 2: add the base pose (scratch fixup): entries {u16 slotByteOffset, pad, s16 addend, pad},
+    // stride 8, terminated by slotByteOffset == 0x1000.
+    if (scratch) {
+        const uint8_t* e = scratch;
+        for (int guard = 0; guard < ANIM_MAX_SLOTS * 12; ++guard) {
+            unsigned off = *(const uint16_t*)(e + 0);
+            if (off == 0x1000) break;
+            if (off < sizeof gAnimSlots - 1)
+                *(int16_t*)((uint8_t*)gAnimSlots + off) += *(const int16_t*)(e + 4);
+            e += 8;
+        }
+    }
+
+    // Stage 3: per bone, build local matrix into bank[idx0 & 0x7f].
+    for (int j = 0; j < jc; ++j) {
+        const uint8_t* b = jd + j * 0x1c;
+        int outSlot = b[1] & 0x7f;
+        int rotSlot = b[2];
+        if (rotSlot >= ANIM_MAX_SLOTS) rotSlot = 0;
+        const int16_t* slot = gAnimSlots[rotSlot];
+        float head[3]; for (int c = 0; c < 3; ++c) head[c] = *(const float*)(b + 4 + c * 4);  // host order (swapped at load)
+        eulerMat34(slot[0], slot[1], slot[2], head, (float(*)[4])(bank + outSlot * 0x40));
+    }
+    // Stage 4: forward kinematics in place (bones ordered parent-before-child). ModelBone.parent
+    // (@0) is the parent's BANK SLOT index directly (retail: parent<<6 into the bank), not an array
+    // index; a negative parent marks a root (local matrix already world).
+    for (int j = 0; j < jc; ++j) {
+        const uint8_t* b = jd + j * 0x1c;
+        int parent = (int8_t)b[0];
+        int outSlot = b[1] & 0x7f;
+        if (parent < 0 || parent == outSlot) continue;
+        float* M = (float*)(bank + outSlot * 0x40);
+        float* P = (float*)(bank + parent * 0x40);
+        float t[12]; PSMTXConcat(P, M, t);
+        for (int i = 0; i < 12; ++i) M[i] = t[i];
+    }
 }
 
 struct Bits { const uint8_t* d; int pos; int bitLen; };

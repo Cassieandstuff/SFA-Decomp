@@ -62,6 +62,18 @@ void bswapModelRenderOps(void* m) {
         int total = h->displayListCount + h->shadowDisplayListCount;
         for (int i = 0; i < total; ++i) beFix32(dt + i * 0x1c);
     }
+    // jointData contents: ModelBone[jointCount], stride 0x1c = {s8 parent@0, u8 idx[3]@1,
+    // f32 head[3]@4, f32 tail[3]@0x10}. The head/tail floats are BE on disc; game code
+    // (modelInitBones bind pose, modelCalcVtxGroupMtxs vertex-group blend) reads them natively,
+    // so swap them to host order here. parent/idx are bytes (no swap).
+    unsigned jdOff = *(unsigned*)&h->jointData;
+    if (jdOff) {
+        unsigned char* jd = (unsigned char*)m + jdOff;
+        for (int i = 0; i < h->jointCount; ++i) {
+            unsigned char* b = jd + i * 0x1c;
+            for (int k = 0; k < 6; ++k) beFix32(b + 4 + k * 4);   // head[3] then tail[3]
+        }
+    }
     // morphTargetPtrs entries (u32 offsets, also relocated per-entry).
     unsigned mtOff = *(unsigned*)&h->morphTargetPtrs;
     if (mtOff) {
