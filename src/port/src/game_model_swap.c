@@ -56,11 +56,16 @@ void bswapModelRenderOps(void* m) {
     }
     // DL table entries: de+0 is a u32 offset (BE leaf) that RelocateModelData reads
     // natively and adds the base to - swap so it relocates to a valid pointer.
+    // DL table entries: ModelDisplayListEntry {void* dlist@0, u16 dlistSize@4, pad}. de+0 is a u32
+    // offset (BE leaf) that RelocateModelData reads natively and adds the base to - swap so it
+    // relocates. dlistSize@4 is ALSO big-endian and MUST be swapped, or GXCallDisplayList replays
+    // far past the intended list (0x14c0 read as 0xc014) into adjacent DLs of a different vertex
+    // format - the misaligned decode that flung skinned verts to the camera.
     unsigned dlOff = *(unsigned*)&h->displayLists;
     if (dlOff) {
         unsigned char* dt = (unsigned char*)m + dlOff;
         int total = h->displayListCount + h->shadowDisplayListCount;
-        for (int i = 0; i < total; ++i) beFix32(dt + i * 0x1c);
+        for (int i = 0; i < total; ++i) { beFix32(dt + i * 0x1c); beFix16(dt + i * 0x1c + 4); }
     }
     // jointData contents: ModelBone[jointCount], stride 0x1c = {s8 parent@0, u8 idx[3]@1,
     // f32 head[3]@4, f32 tail[3]@0x10}. The head/tail floats are BE on disc; game code
