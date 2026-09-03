@@ -24,9 +24,20 @@ extern void  bswapModelFileHeader(void* p);
 extern void  bswapModelRenderOps(void* p);
 extern double acos(double);   // avoid <math.h> so we don't hit ucrt's inline acosf
 
-// --- MODELS.tab / MODELS.bin (loaded by dir, like the model_view tool) ------
-static unsigned char* gModelsTab; static int gModelsTabSize;
+// --- MODELS.tab / MODELS.bin -------------------------------------------------
+// TWO model tables: the ROOT-level MODELS.tab/bin is the GLOBAL table objects load their
+// character/prop models from (the OBJECTS.bin modelFileIds index it); each <dir>/MODELS.tab is
+// the per-area terrain/prop set the SHOW_MODELS viewer browses. getTableFileEntry resolves
+// against root by default (objects), or the per-dir set when the viewer opts in via
+// stairfax_model_perdir(1). gModelSrcRoot records which source the last lookup used so
+// loadModelsBin / loadAndDecompressDataFile read the matching .bin.
+static unsigned char* gModelsTab; static int gModelsTabSize;   // per-dir (viewer)
 static unsigned char* gModelsBin; static int gModelsBinSize;
+static unsigned char* gRootModelsTab; static int gRootModelsTabSize;   // root/global (objects)
+static unsigned char* gRootModelsBin; static int gRootModelsBinSize;
+static int gUsePerDir;      // viewer opts in; objects leave it 0 -> root
+static int gModelSrcRoot;   // set by getTableFileEntry: 1 = last entry came from root
+void stairfax_model_perdir(int on) { gUsePerDir = on; }
 
 // --- anim data pipeline (MODANIM/AMAP global, ANIM per-dir) ------------------
 // modelLoadAnimations + modelGetAmapSize read these via fileLoadToBufferOffset (dvd_shim)
@@ -74,6 +85,9 @@ static void modelsEnsureLoaded(void) {
     char p[128];
     snprintf(p, sizeof p, "%s/MODELS.tab", dir); gModelsTab = (unsigned char*)loadFileByPath(p, &gModelsTabSize, 0);
     snprintf(p, sizeof p, "%s/MODELS.bin", dir); gModelsBin = (unsigned char*)loadFileByPath(p, &gModelsBinSize, 0);
+    // root/global model table - where objects' modelFileIds resolve
+    if (!gRootModelsTab) gRootModelsTab = (unsigned char*)loadFileByPath((char*)"MODELS.tab", &gRootModelsTabSize, 0);
+    if (!gRootModelsBin) gRootModelsBin = (unsigned char*)loadFileByPath((char*)"MODELS.bin", &gRootModelsBinSize, 0);
     animFilesEnsureLoaded(dir);
 }
 // Find the "ZLB" block within maxScan bytes (models have a small metadata prefix).
@@ -162,17 +176,32 @@ int stairfax_model_scan(int want) {
     return first;
 }
 
-// getTableFileEntry(MODELS_TAB_A, index) -> the model's MODELS.bin entry word (BE).
+// Look up `index` in one MODELS.tab; return the entry word (with 0x10000000 flag) or 0.
+static unsigned modelsTabEntry(const unsigned char* tab, int tabSize, int index) {
+    if (!tab || index < 0 || (index + 1) * 4 > tabSize) return 0;
+    unsigned e = beRead32(tab + index * 4);
+    return (e & 0x0fffffff) ? e : 0;
+}
+// The .bin matching the source the last getTableFileEntry resolved.
+static const unsigned char* curModelsBin(int* sz) {
+    if (gModelSrcRoot) { *sz = gRootModelsBinSize; return gRootModelsBin; }
+    *sz = gModelsBinSize; return gModelsBin;
+}
+
+// getTableFileEntry(MODELS_TAB_A, index) -> the model's MODELS.bin entry word (BE). Objects
+// resolve against the ROOT/global table; the SHOW_MODELS viewer opts into per-dir first.
 int getTableFileEntry(int fileId, int index, int* out) {
     if (fileId != 0x2a) { if (out) *out = 0; return 0; }
     modelsEnsureLoaded();
-    if (!gModelsTab || index < 0 || (index + 1) * 4 > gModelsTabSize) return 0;
-    unsigned entry = beRead32(gModelsTab + index * 4);
-    if (!(entry & 0x0fffffff)) return 0;   // missing model
-    if (out) *out = (int)entry;
+    unsigned e = 0;
+    if (gUsePerDir && (e = modelsTabEntry(gModelsTab, gModelsTabSize, index))) gModelSrcRoot = 0;
+    else if ((e = modelsTabEntry(gRootModelsTab, gRootModelsTabSize, index)))  gModelSrcRoot = 1;
+    else if ((e = modelsTabEntry(gModelsTab, gModelsTabSize, index)))          gModelSrcRoot = 0;
+    if (!e) return 0;
+    if (out) *out = (int)e;
     if (getenv("STAIRFAX_MODEL_TEST"))
-        fprintf(stderr, "[model] tab[%d]=0x%08x (off=0x%x) tabSize=0x%x binSize=0x%x\n",
-                index, out ? *out : 0, out ? (*out & 0x0fffffff) : 0, gModelsTabSize, gModelsBinSize);
+        fprintf(stderr, "[model] tab[%d]=0x%08x (off=0x%x) src=%s\n",
+                index, (int)e, e & 0x0fffffff, gModelSrcRoot ? "root" : "perdir");
     return 1;
 }
 
@@ -181,10 +210,11 @@ void loadModelsBin(int offsetFlags, int* pAnimCount, int* pHeaderSize, int* pAma
     (void)id;
     modelsEnsureLoaded();
     unsigned off = (unsigned)offsetFlags & 0x0fffffff;
-    if (!gModelsBin || off + 0x24 > (unsigned)gModelsBinSize) {
+    int binSize; const unsigned char* bin = curModelsBin(&binSize);
+    if (!bin || off + 0x24 > (unsigned)binSize) {
         *pAnimCount = *pHeaderSize = *pAmapFlag = *pDataLen = 0; return;
     }
-    const unsigned char* e = gModelsBin + off;
+    const unsigned char* e = bin + off;
     *pDataLen    = (int)beRead32(e + 0x04);
     *pAmapFlag   = (int)beRead32(e + 0x18);
     *pAnimCount  = (int)beRead32(e + 0x1c);
@@ -211,19 +241,13 @@ void* loadAndDecompressDataFile(int fileId, void* dst, int offsetFlags, unsigned
         return dst;
     }
 
-    // MODELS.bin (default): FACEFEED metadata prefix + ZLB block.
-    if (!gModelsBin || !dst || off >= (unsigned)gModelsBinSize) return dst;
-    if (getenv("STAIRFAX_MODEL_TEST")) {
-        const unsigned char* d = gModelsBin + off;
-        fprintf(stderr, "[model] rec@0x%x:", off);
-        for (int i = 0; i < 0x40 && off + i < (unsigned)gModelsBinSize; ++i) fprintf(stderr, " %02x", d[i]);
-        fprintf(stderr, "\n");
-    }
-    int z = findZLB(gModelsBin + off, 0x40);
-    if (z < 0) { if (getenv("STAIRFAX_MODEL_TEST")) fprintf(stderr, "[model] no ZLB at 0x%x\n", off); return dst; }
-    if (getenv("STAIRFAX_MODEL_TEST")) fprintf(stderr, "[model] ZLB at +0x%x, usize=0x%x csize=0x%x\n",
-        z, beRead32(gModelsBin+off+z+8), beRead32(gModelsBin+off+z+0xc));
-    const unsigned char* zlb = gModelsBin + off + z;
+    // MODELS.bin (default): FACEFEED metadata prefix + ZLB block, from the source getTableFileEntry
+    // resolved (root for objects, per-dir for the viewer).
+    int binSize; const unsigned char* bin = curModelsBin(&binSize);
+    if (!bin || !dst || off >= (unsigned)binSize) return dst;
+    int z = findZLB(bin + off, 0x40);
+    if (z < 0) { if (getenv("STAIRFAX_MODEL_TEST")) fprintf(stderr, "[model] no ZLB at 0x%x (src=%s)\n", off, gModelSrcRoot?"root":"perdir"); return dst; }
+    const unsigned char* zlb = bin + off + z;
     unsigned csize = beRead32(zlb + 0xc);
     size_t got = 0;
     if (stfx_inflate_zlib((unsigned char*)dst, length ? length : 0x200000, zlb + 0x10, csize, &got) != 0) {

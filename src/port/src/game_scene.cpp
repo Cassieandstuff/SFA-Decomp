@@ -107,6 +107,7 @@ extern "C" { void* ObjModel_Load(int id, int loadFlag, int* outSize); int stairf
     void ObjModel_InitResourceCaches(void); void ObjModel_InitScratchBuffers(void);
     void* stairfax_model_load_static(int id);
     void stairfax_bswap_model_moves(void* header);
+    void stairfax_model_perdir(int on);   // viewer: resolve MODELS.tab per-dir (else root/global)
     int Object_ObjAnimSetMove(void* objAnimHandle, int moveId, float moveProgress, unsigned char flags);
     void modelAnimEvalChannels(uint8_t* dst, void* model, void* channel, float blend, int flags);
     extern int* gModelAnimOffsetTable; }
@@ -596,6 +597,7 @@ extern "C" void sceneRender(int a, int b, int c, int d, int e, int f) {
         stairfax_sky_init();           // bring up the real sky DLL's time-of-day clock
         if (getenv("STAIRFAX_SHOW_MODELS")) {
             ensureModelCaches();
+            stairfax_model_perdir(1);   // the viewer browses the per-dir terrain/prop set
             int one[] = { getenv("STAIRFAX_MODEL_ONE") ? atoi(getenv("STAIRFAX_MODEL_ONE")) : 0 };
             int many[] = {136,141,294,296,477,528,532,533};
             int* ids = one[0] ? one : many;
@@ -640,6 +642,7 @@ extern "C" void sceneRender(int a, int b, int c, int d, int e, int f) {
                 gDispModels.push_back(dm);
             }
             fprintf(stderr, "[models] %zu display models loaded\n", gDispModels.size());
+            stairfax_model_perdir(0);   // objects resolve against root/global again
         }
         if (const char* mid = getenv("STAIRFAX_ROMLIST")) {
             extern int stairfax_romlist_dump(int mapId, int maxLog);
@@ -750,8 +753,14 @@ extern "C" void sceneRender(int a, int b, int c, int d, int e, int f) {
             uint8_t* o = (uint8_t*)gObjList[i];
             void* om = Obj_GetActiveModel(o);
             uint8_t* h = om ? *(uint8_t**)om : nullptr;   // ObjModel.file (offset 0)
-            if (getenv("STAIRFAX_MODEL_DBG") && i < 6)
-                fprintf(stderr, "[spawn] obj %d o=%p om=%p h=%p\n", i, (void*)o, om, (void*)h);
+            if (getenv("STAIRFAX_SPAWN_DBG")) {
+                uint8_t* def = *(uint8_t**)(o + 0x50);    // anim.modelInstance = ObjDef
+                int mcnt = def ? def[0x55] : -1;
+                int32_t* mids = def ? *(int32_t**)(def + 0x08) : nullptr;
+                unsigned flags = def ? *(uint32_t*)(def + 0x02) : 0;   // ObjDef.flags@0x02
+                fprintf(stderr, "[spawn] obj %d modelCount=%d mid0=%d flags=%08x single=%d dllId=%d om=%p\n",
+                        i, mcnt, (mids&&mcnt>0)?mids[0]:0, flags, flags&1, def?*(int16_t*)(def+0x50):0, om);
+            }
             if (!h) continue;
             if (!logged) fprintf(stderr, "[spawn] obj %d jointCount=%d vtxCount=%d\n",
                                  i, h[0xF3], *(uint16_t*)(h + 0xE4));
