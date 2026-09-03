@@ -111,7 +111,14 @@ void* getCache(void) {
     return gCacheBuf;
 }
 void  cacheQueueWait(int sync)                    { (void)sync; }
-void  copyToCache(void* dst, void* src, u32 n)    { if (dst && src) memcpy(dst, src, n); }
+// Faithful to mm.c's copyToCache non-locked-cache branch: the count argument is a cache-line
+// count (0x20 bytes each), NOT a byte count - len = count ? count<<5 : 0x1000. modelInitMtxs
+// relies on this: its full-chunk copies pass count=0 (=> 0x1000 bytes) and the final passes
+// (jointCount+extra)*2 lines. The old memcpy(dst,src,n) copied n BYTES, so a 36-joint model
+// staged only 72 of its 2304 joint-matrix bytes and every skinned draw read a garbage bank.
+void  copyToCache(void* dst, void* src, u32 count) {
+    if (dst && src) memcpy(dst, src, count ? ((size_t)count << 5) : 0x1000);
+}
 void  memcpyToCache(void* dst, void* src, u32 n)  { if (dst && src) memcpy(dst, src, n); }
 
 // --- atomic singly-linked list (node's first word is the next pointer) ------

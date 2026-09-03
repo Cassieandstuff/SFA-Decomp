@@ -163,6 +163,7 @@ void* stairfax_spawn_player(int seq, float x, float y, float z) {
 // be fully set up yet, so catch a fault rather than take down the frame.
 extern void objRenderModel(void* obj);
 extern void gx_draw_setRealSkin(int on);
+extern void gx_draw_setSourceBounds(const void* lo, const void* hi);
 extern int  Object_ObjAnimSetMove(void* objAnim, int move, float progress, unsigned char flags);
 extern void* Obj_GetActiveModel(void* obj);
 void stairfax_render_player(void* obj, int move, float progress) {
@@ -171,6 +172,22 @@ void stairfax_render_player(void* obj, int move, float progress) {
     // modelDoRenderInstrs skip ObjModel_UpdateAnimMatrices - renders bind pose, proving the real
     // interpreter decodes the geometry without needing the (not-yet-wired) character anim data.
     int bindpose = getenv("STAIRFAX_PLAYER_BINDPOSE") != 0;
+    // Bound the POS-array index reads to the model's own working vertex buffer so a bad
+    // display-list index (or trailing junk misread as a draw) is dropped instead of faulting
+    // on a wild read. The real render path (objprint) sets GX_VA_POS to ObjModel.vtxBuf[buf]
+    // (0x1c[(bufferFlags>>1)&1]); file->vertexCount (@0xE4) * 6 bytes bounds it.
+    {
+        unsigned char* am = (unsigned char*)Obj_GetActiveModel(obj);
+        if (am) {
+            unsigned buf = (*(unsigned short*)(am + 0x18) >> 1) & 1;   // ObjModel.bufferFlags
+            unsigned char* vtx = *(unsigned char**)(am + 0x1c + buf * 4);  // vtxBuf[buf]
+            unsigned char* file = *(unsigned char**)(am + 0);              // ObjModel.file
+            if (vtx && file) {
+                unsigned vc = *(unsigned short*)(file + 0xE4);             // vertexCount
+                gx_draw_setSourceBounds(vtx, vtx + (size_t)vc * 6);
+            }
+        }
+    }
     __try {
         if (bindpose) {
             void* mdl = Obj_GetActiveModel(obj);

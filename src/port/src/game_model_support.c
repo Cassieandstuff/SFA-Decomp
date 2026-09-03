@@ -122,6 +122,39 @@ void  PSMTXTranspose(const float* s, float* d) {   // 3x3 transpose, translation
     d[8]=s[2]; d[9]=s[6]; d[10]=s[10];d[11]=0.0f;
 }
 void  PSMTXReorder(const float* s, float* d) { PSMTXCopy(s,d); }  // approx; used off the load path
+// ab = a * b for 3x4 matrices (b's implicit 4th row = [0 0 0 1]); alias-safe. This is THE model
+// render-path concat: renderOpMatrix does PSMTXConcat(modelView, jointBank[idx], posMtx) and
+// modelInitBones builds the bind pose with it. It was previously a return-0 stub, so every joint
+// matrix (bind AND animated) was garbage - the skinned player rendered as a spike.
+void  PSMTXConcat(const float* a, const float* b, float* ab) {
+    float t[12];
+    t[0]  = a[0]*b[0] + a[1]*b[4] + a[2]*b[8];
+    t[1]  = a[0]*b[1] + a[1]*b[5] + a[2]*b[9];
+    t[2]  = a[0]*b[2] + a[1]*b[6] + a[2]*b[10];
+    t[3]  = a[0]*b[3] + a[1]*b[7] + a[2]*b[11] + a[3];
+    t[4]  = a[4]*b[0] + a[5]*b[4] + a[6]*b[8];
+    t[5]  = a[4]*b[1] + a[5]*b[5] + a[6]*b[9];
+    t[6]  = a[4]*b[2] + a[5]*b[6] + a[6]*b[10];
+    t[7]  = a[4]*b[3] + a[5]*b[7] + a[6]*b[11] + a[7];
+    t[8]  = a[8]*b[0] + a[9]*b[4] + a[10]*b[8];
+    t[9]  = a[8]*b[1] + a[9]*b[5] + a[10]*b[9];
+    t[10] = a[8]*b[2] + a[9]*b[6] + a[10]*b[10];
+    t[11] = a[8]*b[3] + a[9]*b[7] + a[10]*b[11] + a[11];
+    for (int i = 0; i < 12; ++i) ab[i] = t[i];
+}
+// m = scale(x,y,z): a pure diagonal scale matrix (matches dolphin PSMTXScale, which SETS m).
+void  PSMTXScale(float* m, float x, float y, float z) {
+    m[0]=x; m[1]=0; m[2]=0;  m[3]=0;
+    m[4]=0; m[5]=y; m[6]=0;  m[7]=0;
+    m[8]=0; m[9]=0; m[10]=z; m[11]=0;
+}
+// out = 3x3(m) * in  (rotation/scale only, no translation).
+void  PSMTXMultVecSR(const float* m, const float* in, float* out) {
+    float x=in[0], y=in[1], z=in[2];
+    out[0]=m[0]*x+m[1]*y+m[2]*z;
+    out[1]=m[4]*x+m[5]*y+m[6]*z;
+    out[2]=m[8]*x+m[9]*y+m[10]*z;
+}
 
 // --- OS fast casts (shadow OSFastCast.h declares these extern) --------------
 int16_t __OSf32tos16(float f)        { return (int16_t)f; }
@@ -348,7 +381,29 @@ void modelRenderInstrsState_init(void* st, void* instrs, int bitCount, int field
 int  modelRenderInstrsState_getBit(void* st) { return ((RIState*)st)->bit; }
 void modelRenderInstrsState_setBit(void* st, int bit) { ((RIState*)st)->bit = bit; }
 void  ShaderDef_free(void) { }
-void  shaderInit(void) { }
+// Real shaderInit (rcp_dolphin.c) records a render op's texture references into the
+// ObjModel's per-op ModelRenderOpTextureRefs. The port renders untextured, but the
+// character display lists are baked with a fixed vertex layout whose matrix-index
+// prefix INCLUDES a texture-matrix index (GX_VA_TEX0MTXIDX) whenever the op is
+// textured - modelRenderFn_setVtxDescr gates that attribute on textureRefs[0]/[1]
+// being non-null. Leaving refs null (the old no-op stub) made the runtime descriptor
+// one attribute short of the baked DL, so every vertex drifted by a byte and the
+// draw walked off the list. Reproduce the invariant: a render op that references any
+// texture layer gets a non-null texture0 sentinel, so the descriptor matches the
+// baked layout. The sentinel is never dereferenced on the untextured path (the TEV /
+// selectTexture stages are stubbed). Layout: def = Shader* (render op); texture0 @ +0.
+static unsigned char gShaderTexSentinel[4];
+void  shaderInit(unsigned char* def, void* textures, void* obj, int shaderFlags) {
+    (void)obj; (void)shaderFlags;
+    if (!def || !textures) return;
+    unsigned char layerCount = def[0x41];   // Shader.layerCount
+    void* reg1 = *(void**)(def + 0x08);      // Shader.reg1Texture
+    void* reg2 = *(void**)(def + 0x14);      // Shader.reg2Texture
+    void** texRefs = (void**)textures;       // [0]=texture0, [1]=texture1
+    if (reg1)              texRefs[0] = reg1;
+    else if (layerCount)   texRefs[0] = gShaderTexSentinel;
+    if (reg2)              texRefs[1] = reg2;
+}
 void  objFrozenRenderCb(void) { }
 
 // --- misc ------------------------------------------------------------------

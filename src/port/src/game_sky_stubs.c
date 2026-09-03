@@ -49,9 +49,7 @@ int GXSetTevDirect(void) { return 0; }
 int GXSetTevOrder(void) { return 0; }
 int GXSetTevSwapMode(void) { return 0; }
 int GXSetTexCoordGen2(void) { return 0; }
-int PSMTXConcat(void) { return 0; }
-int PSMTXMultVecSR(void) { return 0; }
-int PSMTXScale(void) { return 0; }
+/* PSMTXConcat / PSMTXMultVecSR / PSMTXScale are real in game_model_support.c (model render path). */
 int PSVECMag(void) { return 0; }
 int PSVECNormalize(void) { return 0; }
 int PSVECScale(void) { return 0; }
