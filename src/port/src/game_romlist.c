@@ -164,10 +164,12 @@ void* stairfax_spawn_player(int seq, float x, float y, float z) {
 extern void objRenderModel(void* obj);
 extern void gx_draw_setRealSkin(int on);
 extern void gx_draw_setSourceBounds(const void* lo, const void* hi);
+extern void gx_draw_setForceLayout(int stride, int posOff, int posSz);
 extern int  Object_ObjAnimSetMove(void* objAnim, int move, float progress, unsigned char flags);
 extern void* Obj_GetActiveModel(void* obj);
 void stairfax_render_player(void* obj, int move, float progress) {
     gx_draw_setRealSkin(1);
+    gx_draw_setForceLayout(0, 0, 0);   // clear any interim POS-only layout the object pass left set
     // Diagnostic: STAIRFAX_PLAYER_BINDPOSE sets ModelFileHeader.flags (@0x02) bit 1, which makes
     // modelDoRenderInstrs skip ObjModel_UpdateAnimMatrices - renders bind pose, proving the real
     // interpreter decodes the geometry without needing the (not-yet-wired) character anim data.

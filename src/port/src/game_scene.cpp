@@ -260,7 +260,7 @@ static void decodeAtlas(uint8_t* a, float frameF, int moveIdx,
             if (ang[c] < dbgMin) dbgMin = ang[c]; if (ang[c] > dbgMax) dbgMax = ang[c];
         }
         const uint8_t* b = jd + j * 0x1c; int parent = (int8_t)b[0];
-        float head[3]; for (int c = 0; c < 3; ++c) head[c] = mdlBEF32(b + 4 + c*4);
+        float head[3]; for (int c = 0; c < 3; ++c) head[c] = *(const float*)(b + 4 + c*4);
         float L[3][4]; jointLocalMat34(ang[0], ang[1], ang[2], head, L);
         if (parent >= 0 && parent < j) mat34Mul(A[parent], L, A[j]); else mat34Copy(L, A[j]);
         for (int r = 0; r < 3; ++r) { for (int cc = 0; cc < 3; ++cc) jmtx[j][r][cc] = A[j][r][cc];
@@ -404,6 +404,9 @@ extern "C" void modelAnimBuildJointMatrices(int* out, uint8_t* dst, void* work, 
         float t[12]; PSMTXConcat(P, M, t);
         for (int i = 0; i < 12; ++i) M[i] = t[i];
     }
+    // The extra vertex-group joints (bank[jointCount..]) are filled by the real modelCalcVtxGroupMtxs
+    // in modelInitMtxs after this returns (world * inverse-bind blends of two main joints); the bank
+    // clear above leaves them identity until then.
 }
 
 struct Bits { const uint8_t* d; int pos; int bitLen; };
@@ -487,7 +490,7 @@ static void renderModel(const DispModel& dm, const float camView[3][4],
         static float accum[MAX_JOINTS][3];
         if (jd && jc > 0 && jc <= MAX_JOINTS) {
             for (int j=0;j<jc;++j){ const uint8_t* b=jd+j*0x1c; int parent=(int8_t)b[0];
-                for (int c=0;c<3;++c){ float head=mdlBEF32(b+4+c*4), tail=mdlBEF32(b+0x10+c*4);
+                for (int c=0;c<3;++c){ float head=*(const float*)(b+4+c*4), tail=*(const float*)(b+0x10+c*4);
                     accum[j][c]=head + ((parent>=0&&parent<j)?accum[parent][c]:0.0f);
                     gOff[j][c]=accum[j][c]-tail; } }
             uint8_t* ed = *(uint8_t**)(h + 0x54); int ec = h[0xF4];
@@ -541,7 +544,7 @@ static void renderModel(const DispModel& dm, const float camView[3][4],
                 static float A[MAX_JOINTS][3][4];
                 float t = gFrameCounter * 0.05f;
                 for (int j=0;j<jc;++j){ const uint8_t* b=jd+j*0x1c; int parent=(int8_t)b[0];
-                    float head[3]; for(int c=0;c<3;++c) head[c]=mdlBEF32(b+4+c*4);
+                    float head[3]; for(int c=0;c<3;++c) head[c]=*(const float*)(b+4+c*4);
                     float a0=0.25f*sinf(t+j*0.6f), a1=0.18f*sinf(t*1.3f+j*0.4f), a2=0.22f*sinf(t*0.7f+j);
                     float L[3][4]; jointLocalMat34(a0, a1, a2, head, L);
                     if (parent>=0 && parent<j) mat34Mul(A[parent], L, A[j]); else mat34Copy(L, A[j]);
