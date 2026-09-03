@@ -239,6 +239,7 @@ add_executable(game_engine EXCLUDE_FROM_ALL
     src/game_assetfile.c
     src/game_object_stubs.c
     src/game_romlist.c
+    src/game_mapcells.c
     src/game_model_support.c
     src/game_model_swap.c
     src/game_objdef_swap.c

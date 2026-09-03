@@ -34,8 +34,13 @@
 #include <cstdint>
 #include <cmath>
 #include <vector>
+#include <unordered_map>
+
+struct StairfaxMapCell { int cellX, cellZ, blockId; };
 
 extern "C" {
+    int stairfax_mapcells_decode(int mapId, StairfaxMapCell* out, int maxOut,
+                                 int* sizeX, int* sizeZ, int* originX, int* originZ);
     uint8_t* gxTexDecode(int fmt, int w, int h, const uint8_t* src);
     void VIWaitForRetrace(void);
     void stairfax_gamebit_selftest(void);
@@ -56,7 +61,7 @@ extern "C" {
 
 namespace {
 
-struct Block { AssetMapBlock mb; std::vector<RhiTexture*> texCache; };
+struct Block { AssetMapBlock mb; std::vector<RhiTexture*> texCache; int gid=-1; };
 struct Placement { int block; float wx, wy, wz; };
 
 RhiInstance* gRhi = nullptr;
@@ -526,14 +531,38 @@ void loadScene() {
     unsigned lastOff=0xffffffff;
     for (int i=0;i<tabSize/4;++i){
         unsigned off=asset_mapBlockOffset(tab,tabSize,i); if(off==ASSET_NO_BLOCK||off==lastOff) continue; lastOff=off;
-        Block b; if(asset_loadMapBlock(bin,binSize,tab,tabSize,i,&b.mb)) gBlocks.push_back(std::move(b));
+        Block b; b.gid=i; if(asset_loadMapBlock(bin,binSize,tab,tabSize,i,&b.mb)) gBlocks.push_back(std::move(b));
     }
     if (gBlocks.empty()) { fprintf(stderr,"[scene] no valid blocks in %s\n",binPath); gInitFailed=true; return; }
 
-    int cols=(int)ceilf(sqrtf((float)gBlocks.size()));
-    for (int i=0;i<(int)gBlocks.size();++i){ Placement pl; pl.block=i;
-        pl.wx=(i%cols)*MAP_BLOCK_WORLD_SIZE; pl.wz=(i/cols)*MAP_BLOCK_WORLD_SIZE; pl.wy=(float)gBlocks[i].mb.yOff;
-        gPlaces.push_back(pl); }
+    // Real per-cell placement: decode the map's cell grid (MAPS.bin) and place each block
+    // at its true world cell. Falls back to a square grid when no map id is given or the
+    // decode fails. mapId from STAIRFAX_MAP_ID, else STAIRFAX_ROMLIST (same map the objects
+    // spawn from), so terrain and objects share one coordinate frame.
+    int placedByCells=0;
+    const char* mapIdEnv = getenv("STAIRFAX_MAP_ID"); if(!mapIdEnv) mapIdEnv=getenv("STAIRFAX_ROMLIST");
+    if (mapIdEnv) {
+        static StairfaxMapCell cells[64*64]; int sx=0,sz=0,orgX=0,orgZ=0;
+        int nc=stairfax_mapcells_decode(atoi(mapIdEnv),cells,64*64,&sx,&sz,&orgX,&orgZ);
+        if (nc>0) {
+            std::unordered_map<int,int> byGid;                 // global block id -> gBlocks index
+            for (int i=0;i<(int)gBlocks.size();++i) byGid[gBlocks[i].gid]=i;
+            for (int c=0;c<nc;++c){ auto it=byGid.find(cells[c].blockId); if(it==byGid.end()) continue;
+                Placement pl; pl.block=it->second;
+                pl.wx=(cells[c].cellX-orgX)*MAP_BLOCK_WORLD_SIZE;
+                pl.wz=(cells[c].cellZ-orgZ)*MAP_BLOCK_WORLD_SIZE;
+                pl.wy=(float)gBlocks[it->second].mb.yOff;
+                gPlaces.push_back(pl); placedByCells++; }
+            fprintf(stderr,"[scene] cell grid map %s: %dx%d origin=(%d,%d) %d cells, %d placed\n",
+                    mapIdEnv,sx,sz,orgX,orgZ,nc,placedByCells);
+        } else fprintf(stderr,"[scene] cell decode failed for map %s (rc=%d)\n",mapIdEnv,nc);
+    }
+    if (!placedByCells) {                                      // fallback: square grid
+        int cols=(int)ceilf(sqrtf((float)gBlocks.size()));
+        for (int i=0;i<(int)gBlocks.size();++i){ Placement pl; pl.block=i;
+            pl.wx=(i%cols)*MAP_BLOCK_WORLD_SIZE; pl.wz=(i/cols)*MAP_BLOCK_WORLD_SIZE; pl.wy=(float)gBlocks[i].mb.yOff;
+            gPlaces.push_back(pl); }
+    }
 
     float wmn[3]={1e18f,1e18f,1e18f}, wmx[3]={-1e18f,-1e18f,-1e18f};
     for (auto& pl : gPlaces) {

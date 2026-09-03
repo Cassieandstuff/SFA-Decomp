@@ -37,6 +37,7 @@ static const struct { int id; const char* name; SwapFn sw; } gMldf[] = {
     { 0x3f, "OBJINDEX.bin", sw_u16      }, // s16 seq->objId table
     { 0x1e, "MAPS.tab",     sw_u32      }, // per-map 7-word section offsets into MAPS.bin
     { 0x1d, "MAPS.bin",     sw_none     }, // romlist/map data (typed access via offsets)
+    { 0x27, "TRKBLK.tab",   sw_u16      }, // cumulative per-romlist block-id bases (0xffff-term)
 };
 
 #define MLDF_MAX_ID 0x100
