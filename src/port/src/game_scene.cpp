@@ -753,18 +753,31 @@ extern "C" void sceneRender(int a, int b, int c, int d, int e, int f) {
             uint8_t* o = (uint8_t*)gObjList[i];
             void* om = Obj_GetActiveModel(o);
             uint8_t* h = om ? *(uint8_t**)om : nullptr;   // ObjModel.file (offset 0)
-            if (getenv("STAIRFAX_SPAWN_DBG")) {
-                uint8_t* def = *(uint8_t**)(o + 0x50);    // anim.modelInstance = ObjDef
-                int mcnt = def ? def[0x55] : -1;
-                int32_t* mids = def ? *(int32_t**)(def + 0x08) : nullptr;
-                unsigned flags = def ? *(uint32_t*)(def + 0x02) : 0;   // ObjDef.flags@0x02
-                fprintf(stderr, "[spawn] obj %d modelCount=%d mid0=%d flags=%08x single=%d dllId=%d om=%p\n",
-                        i, mcnt, (mids&&mcnt>0)?mids[0]:0, flags, flags&1, def?*(int16_t*)(def+0x50):0, om);
+            uint8_t* def = *(uint8_t**)(o + 0x50);        // anim.modelInstance = ObjDef
+            int32_t* mids = def ? *(int32_t**)(def + 0x08) : nullptr;
+            int mcnt = def ? def[0x55] : 0;
+            // Most objects are SINGLE_MODEL: loadCharacter defers their model to the object DLL's
+            // setup fn (dll+0x18), which the port doesn't run -> no bank -> om/h null. Port-side
+            // fix: load the object's own model (modelFileIds[0], resolved via the ROOT table) and
+            // render it at the object position, bypassing the DLL-gated bank. Cached by model id.
+            if (!h && mcnt > 0 && mids && mids[0] > 0) {
+                static int   omId[512]; static uint8_t* omHdr[512]; static int nOm = 0;
+                int fid = mids[0]; uint8_t* mh = nullptr;
+                for (int k=0;k<nOm;++k) if (omId[k]==fid){ mh=omHdr[k]; break; }
+                if (!mh && nOm < 512) {
+                    mh = (uint8_t*)stairfax_model_load_static(-fid);   // bind-pose (skips anim load)
+                    omId[nOm]=fid; omHdr[nOm]=mh; ++nOm;
+                }
+                h = mh;
             }
+            if (getenv("STAIRFAX_SPAWN_DBG"))
+                fprintf(stderr, "[spawn] obj %d modelCount=%d mid0=%d om=%p h=%p\n",
+                        i, mcnt, (mids&&mcnt>0)?mids[0]:0, om, (void*)h);
             if (!h) continue;
             if (!logged) fprintf(stderr, "[spawn] obj %d jointCount=%d vtxCount=%d\n",
                                  i, h[0xF3], *(uint16_t*)(h + 0xE4));
-            DispModel dm; dm.h = h; dm.scale = 1.0f;
+            DispModel dm; dm.h = h;
+            dm.scale = getenv("STAIRFAX_MODEL_SCALE") ? (float)atof(getenv("STAIRFAX_MODEL_SCALE")) : 1.0f;
             if (grid) {
                 float sp = gWorldR * 0.28f;
                 dm.wx = gWorldCtr[0] + ((cell % cols) - 2.5f) * sp;

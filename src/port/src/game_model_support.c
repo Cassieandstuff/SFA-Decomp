@@ -197,7 +197,14 @@ int getTableFileEntry(int fileId, int index, int* out) {
     if (gUsePerDir && (e = modelsTabEntry(gModelsTab, gModelsTabSize, index))) gModelSrcRoot = 0;
     else if ((e = modelsTabEntry(gRootModelsTab, gRootModelsTabSize, index)))  gModelSrcRoot = 1;
     else if ((e = modelsTabEntry(gModelsTab, gModelsTabSize, index)))          gModelSrcRoot = 0;
-    if (!e) return 0;
+    if (!e) {
+        if (getenv("STAIRFAX_MODEL_TEST"))
+            fprintf(stderr, "[model] tab[%d] MISS (rootTab=%p sz=%d root[i]=0x%x perdir=%p)\n",
+                    index, (void*)gRootModelsTab, gRootModelsTabSize,
+                    (gRootModelsTab && (index+1)*4<=gRootModelsTabSize) ? (unsigned)beRead32(gRootModelsTab+index*4) : 0,
+                    (void*)gModelsTab);
+        return 0;
+    }
     if (out) *out = (int)e;
     if (getenv("STAIRFAX_MODEL_TEST"))
         fprintf(stderr, "[model] tab[%d]=0x%08x (off=0x%x) src=%s\n",
