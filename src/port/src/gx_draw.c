@@ -26,6 +26,7 @@ static RhiTexture*   gTex;
 
 void gx_draw_setRhi(RhiInstance* rhi, RhiSwapchain* sc) { gRhi = rhi; gSc = sc; }
 void gx_draw_setTexture(RhiTexture* tex) { gTex = tex; }
+void gx_draw_setAlphaMode(int mode) { if (gRhi) rhi_setAlphaMode(gRhi, mode); }
 
 // --- vertex format state ---------------------------------------------------
 typedef struct { u8 cnt; u8 type; u8 frac; } VatAttr;

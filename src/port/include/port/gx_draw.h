@@ -18,6 +18,8 @@ void gx_draw_setRhi(RhiInstance* rhi, RhiSwapchain* sc);
 void gx_draw_init(void);
 // Bind/unbind the texture sampled by subsequent primitives that carry TEX0.
 void gx_draw_setTexture(RhiTexture* tex);
+// Alpha handling for subsequent textured primitives (RhiAlphaMode: 0 opaque, 1 test, 2 blend).
+void gx_draw_setAlphaMode(int mode);
 void gx_draw_setSourceBounds(const void* lo, const void* hi);
 void gx_draw_setJointOffsets(const float off[][3], int n);
 void gx_draw_setJointMatrices(const float m[][3][4], int n);

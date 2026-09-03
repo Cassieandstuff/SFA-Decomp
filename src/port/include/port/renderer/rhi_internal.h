@@ -45,6 +45,7 @@ typedef struct RhiOps {
 struct RhiInstance {
     const RhiOps* ops;
     RhiBackend    backend;
+    int           alphaMode;   // RhiAlphaMode: 0 opaque, 1 alpha-test cutout, 2 alpha blend
 };
 
 #ifdef __cplusplus

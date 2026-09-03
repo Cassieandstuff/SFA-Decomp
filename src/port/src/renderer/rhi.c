@@ -93,6 +93,9 @@ void rhi_setColorTransform(RhiInstance* r, const float m[16]) {
 void rhi_drawTextured(RhiInstance* r, const RhiTexVertex* verts, uint32_t count) {
     if (r && r->ops && r->ops->drawTextured) r->ops->drawTextured(r, verts, count);
 }
+void rhi_setAlphaMode(RhiInstance* r, int mode) {
+    if (r) r->alphaMode = mode;   // read by each backend's drawTextured
+}
 
 // --- Not yet implemented (this stage is window+clear only) -----------------
 // Declared in rhi.h; routed through ops once the draw/pipeline path lands.

@@ -50,12 +50,15 @@ struct D3d11Instance {
     ComPtr<ID3D11PixelShader>    ps;
     ComPtr<ID3D11InputLayout>    layout;
     ComPtr<ID3D11BlendState>     blend;
+    ComPtr<ID3D11BlendState>     blendAlpha; // src-over for RHI_ALPHA_BLEND
     ComPtr<ID3D11RasterizerState> raster;
     ComPtr<ID3D11DepthStencilState> depthOff;
     ComPtr<ID3D11DepthStencilState> depthOn;
+    ComPtr<ID3D11DepthStencilState> depthReadOnly; // test on, write off (blended geometry)
     ComPtr<ID3D11Buffer>         dynVB;
     UINT                         dynVBCap = 0;
     ComPtr<ID3D11Buffer>         cbXform; // 4x4 MVP (row-major)
+    ComPtr<ID3D11Buffer>         cbAlpha; // x = alpha-test ref (<0 disables the clip)
     float                        mvp[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     bool                         pipelineReady = false;
 };
@@ -188,6 +191,17 @@ bool buildPipeline(D3d11Instance* s) {
     bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
     s->device->CreateBlendState(&bd, &s->blend);
 
+    D3D11_BLEND_DESC ba = {};
+    ba.RenderTarget[0].BlendEnable = TRUE;
+    ba.RenderTarget[0].SrcBlend  = D3D11_BLEND_SRC_ALPHA;
+    ba.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+    ba.RenderTarget[0].BlendOp   = D3D11_BLEND_OP_ADD;
+    ba.RenderTarget[0].SrcBlendAlpha  = D3D11_BLEND_ONE;
+    ba.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+    ba.RenderTarget[0].BlendOpAlpha   = D3D11_BLEND_OP_ADD;
+    ba.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    s->device->CreateBlendState(&ba, &s->blendAlpha);
+
     D3D11_RASTERIZER_DESC rd = {};
     rd.FillMode = D3D11_FILL_SOLID;
     rd.CullMode = D3D11_CULL_NONE;   // GX cull handled later; draw everything for now
@@ -201,6 +215,9 @@ bool buildPipeline(D3d11Instance* s) {
     don.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
     don.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
     s->device->CreateDepthStencilState(&don, &s->depthOn);
+    D3D11_DEPTH_STENCIL_DESC dro = don;
+    dro.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;   // blended: test but don't occlude
+    s->device->CreateDepthStencilState(&dro, &s->depthReadOnly);
 
     D3D11_BUFFER_DESC cbd = {};
     cbd.ByteWidth = 16 * sizeof(float);
@@ -208,6 +225,13 @@ bool buildPipeline(D3d11Instance* s) {
     cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     s->device->CreateBuffer(&cbd, nullptr, &s->cbXform);
+
+    D3D11_BUFFER_DESC cba = {};
+    cba.ByteWidth = 4 * sizeof(float);   // float4 (only .x used)
+    cba.Usage = D3D11_USAGE_DYNAMIC;
+    cba.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    cba.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    s->device->CreateBuffer(&cba, nullptr, &s->cbAlpha);
 
     s->pipelineReady = true;
     return true;
@@ -219,6 +243,7 @@ void d3d11_setColorTransform(RhiInstance* r, const float m[16]) {
 
 static const char* kTexHLSL =
     "cbuffer Xform : register(b0) { float4 uRows[4]; };\n"
+    "cbuffer Alpha : register(b1) { float4 uAlpha; };\n"  // .x = alpha-test ref (<0 = off)
     "Texture2D uTex : register(t0);\n"
     "SamplerState uSamp : register(s0);\n"
     "struct VSIn  { float3 pos : POSITION; float4 col : COLOR; float2 uv : TEXCOORD; };\n"
@@ -226,7 +251,10 @@ static const char* kTexHLSL =
     "VSOut vsmain(VSIn i){ float4 p = float4(i.pos,1.0); VSOut o;\n"
     "  o.pos = float4(dot(uRows[0],p), dot(uRows[1],p), dot(uRows[2],p), dot(uRows[3],p));\n"
     "  o.col = i.col; o.uv = i.uv; return o; }\n"
-    "float4 psmain(VSOut i) : SV_Target { return i.col * uTex.Sample(uSamp, i.uv); }\n";
+    "float4 psmain(VSOut i) : SV_Target {\n"
+    "  float4 c = i.col * uTex.Sample(uSamp, i.uv);\n"
+    "  clip(c.a - uAlpha.x);\n"   // uAlpha.x<0 -> never clips; >0 -> discard below cutout
+    "  return c; }\n";
 
 bool buildTexPipeline(D3d11Instance* s) {
     if (s->texPipelineReady) return true;
@@ -312,8 +340,20 @@ void d3d11_drawTextured(RhiInstance* r, const RhiTexVertex* verts, uint32_t coun
         s->ctx->Unmap(s->cbXform.Get(), 0);
     }
 
+    // Alpha handling: TEST clips texels below a cutout; BLEND does src-over without
+    // depth writes; OPAQUE ignores texel alpha. See RhiAlphaMode.
+    int mode = r->alphaMode;
+    float alphaRef = (mode == RHI_ALPHA_TEST) ? 0.5f : -1.0f;
+    D3D11_MAPPED_SUBRESOURCE abm;
+    if (SUCCEEDED(s->ctx->Map(s->cbAlpha.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &abm))) {
+        float a4[4] = { alphaRef, 0, 0, 0 };
+        memcpy(abm.pData, a4, sizeof(a4));
+        s->ctx->Unmap(s->cbAlpha.Get(), 0);
+    }
+
     ID3D11Buffer* vb = s->dynVB.Get();
     ID3D11Buffer* cb = s->cbXform.Get();
+    ID3D11Buffer* cba = s->cbAlpha.Get();
     ID3D11SamplerState* samp = s->samp.Get();
     UINT offset = 0;
     s->ctx->IASetInputLayout(s->layoutTex.Get());
@@ -322,11 +362,12 @@ void d3d11_drawTextured(RhiInstance* r, const RhiTexVertex* verts, uint32_t coun
     s->ctx->VSSetConstantBuffers(0, 1, &cb);
     s->ctx->VSSetShader(s->vsTex.Get(), nullptr, 0);
     s->ctx->PSSetShader(s->psTex.Get(), nullptr, 0);
+    s->ctx->PSSetConstantBuffers(1, 1, &cba);
     s->ctx->PSSetShaderResources(0, 1, &s->curSRV);
     s->ctx->PSSetSamplers(0, 1, &samp);
     const float bf[4] = {0,0,0,0};
-    s->ctx->OMSetBlendState(s->blend.Get(), bf, 0xffffffff);
-    s->ctx->OMSetDepthStencilState(s->depthOn.Get(), 0);
+    s->ctx->OMSetBlendState(mode == RHI_ALPHA_BLEND ? s->blendAlpha.Get() : s->blend.Get(), bf, 0xffffffff);
+    s->ctx->OMSetDepthStencilState(mode == RHI_ALPHA_BLEND ? s->depthReadOnly.Get() : s->depthOn.Get(), 0);
     s->ctx->RSSetState(s->raster.Get());
     s->ctx->Draw(count, 0);
 }

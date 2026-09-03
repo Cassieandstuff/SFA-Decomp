@@ -778,7 +778,7 @@ extern "C" void sceneRender(int a, int b, int c, int d, int e, int f) {
 
         for (int i=0;i<bb.dlCount;++i){ const uint8_t* rec=dd+bb.dlBase+i*0x1C;
             unsigned o=asset_be32(rec); int sz=asset_be16(rec+4); int shIdx=rec[0x13];
-            RhiTexture* tex=nullptr; int nTex=1;
+            RhiTexture* tex=nullptr; int nTex=1; int alphaMode=RHI_ALPHA_OPAQUE;
             if(shIdx<bb.shCount){ const uint8_t* sh=dd+bb.shOff+shIdx*0x44;
                 unsigned shFlags=asset_be32(sh+0x3C); int layerCount=sh[0x41];
                 // real mapBlockRender_setVtxDcrs: shader flag 0x80000000 forces a single TEX0,
@@ -786,13 +786,20 @@ extern "C" void sceneRender(int a, int b, int c, int d, int e, int f) {
                 // is decoded with only TEX0 misaligns every vertex -> stretched "spike" tris.
                 nTex = (shFlags & 0x80000000u) ? 1 : layerCount;
                 if(nTex<0) nTex=0; if(nTex>8) nTex=8;
+                // Alpha, per mapBlockRender_setShader: force-blend flags -> src-over blend;
+                // alpha-test-opaque (0x400) -> cutout (foliage billboards); else opaque.
+                if(shFlags & 0x60000000u)      alphaMode=RHI_ALPHA_BLEND;
+                else if(shFlags & 0x400u)      alphaMode=RHI_ALPHA_TEST;
                 int ti=(int)asset_be32(sh+0x24);
                 if(ti>=0 && ti<(int)blk.texCache.size()) tex=blk.texCache[ti]; }
             for(int t=0;t<8;++t) GXSetVtxDesc((GXAttr)(GX_VA_TEX0+t), (t<nTex)?texIdx:GX_NONE);
             gx_draw_setTexture(tex);
+            gx_draw_setAlphaMode(alphaMode);
             if(sz>0 && o+(unsigned)sz<=bb.size) GXCallDisplayList((void*)(dd+o), (unsigned)sz);
         }
     }
+
+    gx_draw_setAlphaMode(RHI_ALPHA_OPAQUE);   // don't leak terrain's last mode into models
 
     // Real object models loaded by the real ObjModel_Load, drawn via gx_draw.
     for (auto& dm : gDispModels) renderModel(dm, camView);

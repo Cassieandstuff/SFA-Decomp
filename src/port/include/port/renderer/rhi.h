@@ -99,6 +99,12 @@ typedef struct RhiTexVertex {
 } RhiTexVertex;
 void rhi_drawTextured(RhiInstance* rhi, const RhiTexVertex* verts, uint32_t count);
 
+// Alpha handling applied to subsequent rhi_drawTextured calls (sticky state).
+// OPAQUE: ignore texel alpha. TEST: discard texels below a cutout threshold (foliage
+// billboards etc.). BLEND: src-over alpha blending with depth writes disabled.
+typedef enum RhiAlphaMode { RHI_ALPHA_OPAQUE = 0, RHI_ALPHA_TEST = 1, RHI_ALPHA_BLEND = 2 } RhiAlphaMode;
+void rhi_setAlphaMode(RhiInstance* rhi, int mode);
+
 // Draw - called from gx_shim_submitFifo path (GXWGFifo emulation)
 void rhi_setPipeline(RhiInstance* rhi, RhiPipeline* pipe);
 void rhi_setTexture(RhiInstance* rhi, int slot, RhiTexture* tex);
