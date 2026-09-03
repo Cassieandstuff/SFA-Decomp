@@ -156,18 +156,21 @@ struct VkInst {
 
     // textured pipeline + descriptor plumbing
     VkPipelineLayout      pipelineLayoutTex = VK_NULL_HANDLE;
-    VkPipeline            pipelineTex       = VK_NULL_HANDLE;
+    VkPipeline            pipelineTex       = VK_NULL_HANDLE;  // opaque / alpha-test
+    VkPipeline            pipelineTexBlend  = VK_NULL_HANDLE;  // src-over blend, depth write off
     VkDescriptorSetLayout descSetLayout     = VK_NULL_HANDLE;
     VkDescriptorPool      descPool          = VK_NULL_HANDLE;
     VkSampler             sampler           = VK_NULL_HANDLE;
     VkDescriptorSet       curDescSet        = VK_NULL_HANDLE;
     bool                  texReady          = false;
 
-    // per-frame dynamic vertex buffers
+    // per-frame dynamic vertex buffers, sub-allocated as a bump ring per frame
     VkBuffer         vbo[kFramesInFlight]       = {};
     VkDeviceMemory   vboMem[kFramesInFlight]    = {};
     void*            vboMapped[kFramesInFlight] = {};
     uint32_t         vboCap[kFramesInFlight]    = {};
+    uint32_t         vboOffset[kFramesInFlight] = {};  // bump pointer within the frame's ring
+    uint32_t         vboWant                    = 0;   // high-water; grow at next beginFrame
 
     VkSwap*   active     = nullptr;
     uint32_t  frame      = 0;
@@ -472,6 +475,19 @@ void ensureVbo(VkInst* s, uint32_t frame, uint32_t needed) {
     s->vboCap[frame] = needed;
 }
 
+// Sub-allocate `bytes` (16-byte aligned) from this frame's vertex ring. Returns false on
+// overflow, recording the needed size so beginFrame can grow the ring next frame. The ring
+// is only grown/reset when this frame slot's fence has been waited on, so the GPU is done
+// reading the previous contents.
+static bool vboAlloc(VkInst* s, uint32_t fr, uint32_t bytes, VkDeviceSize* outOff) {
+    uint32_t off = (s->vboOffset[fr] + 15u) & ~15u;
+    if (!s->vbo[fr] || off + bytes > s->vboCap[fr]) {
+        uint32_t want = off + bytes; if (want > s->vboWant) s->vboWant = want;
+        return false;
+    }
+    *outOff = off; s->vboOffset[fr] = off + bytes; return true;
+}
+
 void beginRenderPassIfNeeded(VkInst* s) {
     if (s->rpActive || !s->active) return;
     VkClearValue clears[2] = {};
@@ -665,6 +681,11 @@ void vulkan_beginFrame(RhiInstance* r) {
     uint32_t fr = s->frame;
     api->waitForFences(s->device, 1, &s->inFlight[fr], VK_TRUE, UINT64_MAX);
     api->resetFences(s->device, 1, &s->inFlight[fr]);
+    // Grow this frame's vertex ring to last frame's high-water mark (safe: the fence above
+    // guarantees the GPU finished reading this slot's buffer), then reset the bump pointer.
+    { uint32_t want = s->vboWant > (1u << 20) ? s->vboWant : (1u << 20);
+      if (want > s->vboCap[fr]) ensureVbo(s, fr, want);
+      s->vboOffset[fr] = 0; }
     api->acquireNextImage(s->device, s->active->swapchain, UINT64_MAX, s->acquireSem[fr], VK_NULL_HANDLE, &s->imageIndex);
     api->resetCommandBuffer(s->cmd[fr], 0);
     VkCommandBufferBeginInfo bi = {};
@@ -686,14 +707,13 @@ void vulkan_drawColored(RhiInstance* r, const RhiColorVertex* verts, uint32_t co
     if (!verts || count == 0 || !s->active || !s->pipeline) return;
     uint32_t fr = s->frame;
     uint32_t needed = (uint32_t)sizeof(RhiColorVertex) * count;
-    ensureVbo(s, fr, needed);
-    if (!s->vboMapped[fr]) return;
-    memcpy(s->vboMapped[fr], verts, needed);
+    VkDeviceSize offset;
+    if (!vboAlloc(s, fr, needed, &offset) || !s->vboMapped[fr]) return;
+    memcpy((char*)s->vboMapped[fr] + offset, verts, needed);
 
     beginRenderPassIfNeeded(s);
     api->cmdBindPipeline(s->cmd[fr], VK_PIPELINE_BIND_POINT_GRAPHICS, s->pipeline);
     api->cmdPushConstants(s->cmd[fr], s->pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, 16 * sizeof(float), s->mvp);
-    VkDeviceSize offset = 0;
     api->cmdBindVertexBuffers(s->cmd[fr], 0, 1, &s->vbo[fr], &offset);
     api->cmdDraw(s->cmd[fr], count, 1, 0, 0);
 }
@@ -727,18 +747,19 @@ bool buildTexPipeline(VkInst* s) {
 
     VkDescriptorPoolSize psz = {};
     psz.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    psz.descriptorCount = 256;
+    psz.descriptorCount = 4096;   // one per loaded texture (terrain + object models)
     VkDescriptorPoolCreateInfo dpci = {};
     dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpci.maxSets = 256; dpci.poolSizeCount = 1; dpci.pPoolSizes = &psz;
+    dpci.maxSets = 4096; dpci.poolSizeCount = 1; dpci.pPoolSizes = &psz;
     if (api->createDescriptorPool(s->device, &dpci, nullptr, &s->descPool) != VK_SUCCESS) return false;
 
-    VkPushConstantRange pcr = {};
-    pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT; pcr.size = 16 * sizeof(float);
+    VkPushConstantRange pcr[2] = {};
+    pcr[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;   pcr[0].offset = 0;  pcr[0].size = 16 * sizeof(float);
+    pcr[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; pcr[1].offset = 64; pcr[1].size = sizeof(float); // alpha ref
     VkPipelineLayoutCreateInfo lci = {};
     lci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     lci.setLayoutCount = 1; lci.pSetLayouts = &s->descSetLayout;
-    lci.pushConstantRangeCount = 1; lci.pPushConstantRanges = &pcr;
+    lci.pushConstantRangeCount = 2; lci.pPushConstantRanges = pcr;
     if (api->createPipelineLayout(s->device, &lci, nullptr, &s->pipelineLayoutTex) != VK_SUCCESS) return false;
 
     VkShaderModule vs = makeModule(s, kTexVertSpv, sizeof(kTexVertSpv));
@@ -806,6 +827,19 @@ bool buildTexPipeline(VkInst* s) {
     pci.pDynamicState = &ds; pci.layout = s->pipelineLayoutTex; pci.renderPass = s->renderPass;
 
     VkResult res = api->createGraphicsPipelines(s->device, VK_NULL_HANDLE, 1, &pci, nullptr, &s->pipelineTex);
+
+    // Blend variant: src-over alpha blend with depth writes disabled (translucent geometry).
+    if (res == VK_SUCCESS) {
+        cba.blendEnable = VK_TRUE;
+        cba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        cba.colorBlendOp = VK_BLEND_OP_ADD;
+        cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        cba.alphaBlendOp = VK_BLEND_OP_ADD;
+        dss.depthWriteEnable = VK_FALSE;
+        res = api->createGraphicsPipelines(s->device, VK_NULL_HANDLE, 1, &pci, nullptr, &s->pipelineTexBlend);
+    }
     api->destroyShaderModule(s->device, vs, nullptr);
     api->destroyShaderModule(s->device, fs, nullptr);
     s->texReady = (res == VK_SUCCESS);
@@ -962,15 +996,19 @@ void vulkan_drawTextured(RhiInstance* r, const RhiTexVertex* verts, uint32_t cou
     if (!verts || count == 0 || !s->active || !s->pipelineTex || s->curDescSet == VK_NULL_HANDLE) return;
     uint32_t fr = s->frame;
     uint32_t needed = (uint32_t)sizeof(RhiTexVertex) * count;
-    ensureVbo(s, fr, needed);
-    if (!s->vboMapped[fr]) return;
-    memcpy(s->vboMapped[fr], verts, needed);
+    VkDeviceSize offset;
+    if (!vboAlloc(s, fr, needed, &offset) || !s->vboMapped[fr]) return;
+    memcpy((char*)s->vboMapped[fr] + offset, verts, needed);
+
+    int mode = r->alphaMode;
+    float alphaRef = (mode == RHI_ALPHA_TEST) ? 0.5f : -1.0f;
 
     beginRenderPassIfNeeded(s);
-    api->cmdBindPipeline(s->cmd[fr], VK_PIPELINE_BIND_POINT_GRAPHICS, s->pipelineTex);
+    api->cmdBindPipeline(s->cmd[fr], VK_PIPELINE_BIND_POINT_GRAPHICS,
+                         mode == RHI_ALPHA_BLEND ? s->pipelineTexBlend : s->pipelineTex);
     api->cmdPushConstants(s->cmd[fr], s->pipelineLayoutTex, VK_SHADER_STAGE_VERTEX_BIT, 0, 16 * sizeof(float), s->mvp);
+    api->cmdPushConstants(s->cmd[fr], s->pipelineLayoutTex, VK_SHADER_STAGE_FRAGMENT_BIT, 64, sizeof(float), &alphaRef);
     api->cmdBindDescriptorSets(s->cmd[fr], VK_PIPELINE_BIND_POINT_GRAPHICS, s->pipelineLayoutTex, 0, 1, &s->curDescSet, 0, nullptr);
-    VkDeviceSize offset = 0;
     api->cmdBindVertexBuffers(s->cmd[fr], 0, 1, &s->vbo[fr], &offset);
     api->cmdDraw(s->cmd[fr], count, 1, 0, 0);
 }
@@ -1027,6 +1065,7 @@ void vulkan_destroy(RhiInstance* r) {
         if (s->vboMem[i]) api->freeMemory(s->device, s->vboMem[i], nullptr);
     }
     if (s->pipelineTex)       api->destroyPipeline(s->device, s->pipelineTex, nullptr);
+    if (s->pipelineTexBlend)  api->destroyPipeline(s->device, s->pipelineTexBlend, nullptr);
     if (s->pipelineLayoutTex) api->destroyPipelineLayout(s->device, s->pipelineLayoutTex, nullptr);
     if (s->descPool)          api->destroyDescriptorPool(s->device, s->descPool, nullptr);
     if (s->descSetLayout)     api->destroyDescriptorSetLayout(s->device, s->descSetLayout, nullptr);

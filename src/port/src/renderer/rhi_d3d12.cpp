@@ -54,15 +54,18 @@ struct D3d12Instance {
     // Built-in position+color pipeline (created lazily on first drawColored).
     ComPtr<ID3D12RootSignature> rootSig;
     ComPtr<ID3D12PipelineState> pso;
-    ComPtr<ID3D12Resource>      uploadVB;   // persistently-mapped upload heap
+    ComPtr<ID3D12Resource>      uploadVB;   // persistently-mapped upload heap (per-frame ring)
     void*                       mappedVB = nullptr;
-    UINT                        uploadCap = 0;
+    UINT                        uploadCap = 0;      // ring size in bytes
+    UINT                        uploadOffset = 0;   // bump pointer within the ring this frame
+    UINT                        uploadWant = 0;     // high-water bytes; grow at next beginFrame
     float                       mvp[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     bool                        pipelineReady = false;
 
     // Textured pipeline + SRV heap.
     ComPtr<ID3D12RootSignature>  rootSigTex;
-    ComPtr<ID3D12PipelineState>  psoTex;
+    ComPtr<ID3D12PipelineState>  psoTex;       // opaque / alpha-test (depth write on, blend off)
+    ComPtr<ID3D12PipelineState>  psoTexBlend;  // src-over blend, depth write off
     ComPtr<ID3D12DescriptorHeap> srvHeap;  // shader-visible CBV_SRV_UAV
     UINT                         srvDescSize = 0;
     UINT                         srvNext = 0;
@@ -213,10 +216,47 @@ void d3d12_swapchainResize(RhiInstance* r, RhiSwapchain* h, int w, int t) {
     makeTargets(s, sc);
 }
 
+// (Re)create the persistently-mapped vertex-upload ring at `cap` bytes. Only called from
+// beginFrame, where present()'s waitIdle guarantees the GPU no longer reads the old buffer.
+static bool ensureUploadCap(D3d12Instance* s, UINT cap) {
+    if (cap <= s->uploadCap && s->uploadVB) return true;
+    if (s->uploadVB) { s->uploadVB->Unmap(0, nullptr); s->uploadVB.Reset(); s->mappedVB = nullptr; }
+    D3D12_HEAP_PROPERTIES hp = {}; hp.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC rd = {};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; rd.Width = cap; rd.Height = 1;
+    rd.DepthOrArraySize = 1; rd.MipLevels = 1; rd.Format = DXGI_FORMAT_UNKNOWN;
+    rd.SampleDesc.Count = 1; rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if (FAILED(s->device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&s->uploadVB)))) return false;
+    D3D12_RANGE none = {0, 0};
+    if (FAILED(s->uploadVB->Map(0, &none, &s->mappedVB))) { s->uploadVB.Reset(); return false; }
+    s->uploadCap = cap;
+    return true;
+}
+
+// Sub-allocate `bytes` from the frame's ring (16-byte aligned). Returns false if the frame
+// overflowed the ring; records the needed size so beginFrame can grow it next frame.
+static bool ringAlloc(D3d12Instance* s, UINT bytes, D3D12_GPU_VIRTUAL_ADDRESS* gpu, void** cpu) {
+    UINT off = (s->uploadOffset + 15u) & ~15u;
+    if (!s->uploadVB || off + bytes > s->uploadCap) {
+        UINT want = off + bytes; if (want > s->uploadWant) s->uploadWant = want;
+        return false;
+    }
+    *gpu = s->uploadVB->GetGPUVirtualAddress() + off;
+    *cpu = (char*)s->mappedVB + off;
+    s->uploadOffset = off + bytes;
+    return true;
+}
+
 void d3d12_beginFrame(RhiInstance* r) {
     D3d12Instance* s = self(r);
     D3d12Swapchain* sc = s->active;
     if (!sc) return;
+    // Grow the vertex-upload ring to last frame's high-water mark (GPU idle here), then reset.
+    UINT want = s->uploadWant > (1u << 20) ? s->uploadWant : (1u << 20);
+    if (want > s->uploadCap) { UINT cap = s->uploadCap ? s->uploadCap : (1u << 20);
+                               while (cap < want) cap <<= 1; ensureUploadCap(s, cap); }
+    s->uploadOffset = 0;
     ID3D12CommandAllocator* alloc = sc->allocators[sc->frameIndex].Get();
     alloc->Reset();
     s->cmdList->Reset(alloc, nullptr);
@@ -334,26 +374,12 @@ void d3d12_drawColored(RhiInstance* r, const RhiColorVertex* verts, uint32_t cou
 
     const UINT stride = (UINT)sizeof(RhiColorVertex);
     const UINT needed = stride * count;
-    if (needed > s->uploadCap) {
-        if (s->uploadVB) { s->uploadVB->Unmap(0, nullptr); s->uploadVB.Reset(); s->mappedVB = nullptr; }
-        D3D12_HEAP_PROPERTIES hp = {}; hp.Type = D3D12_HEAP_TYPE_UPLOAD;
-        D3D12_RESOURCE_DESC rd = {};
-        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        rd.Width = needed;
-        rd.Height = 1; rd.DepthOrArraySize = 1; rd.MipLevels = 1;
-        rd.Format = DXGI_FORMAT_UNKNOWN;
-        rd.SampleDesc.Count = 1;
-        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        if (FAILED(s->device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
-                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&s->uploadVB)))) return;
-        D3D12_RANGE none = {0, 0};
-        if (FAILED(s->uploadVB->Map(0, &none, &s->mappedVB))) { s->uploadVB.Reset(); return; }
-        s->uploadCap = needed;
-    }
-    memcpy(s->mappedVB, verts, needed);
+    D3D12_GPU_VIRTUAL_ADDRESS gpu; void* cpu;
+    if (!ringAlloc(s, needed, &gpu, &cpu)) return;   // frame overflow: ring grows next frame
+    memcpy(cpu, verts, needed);
 
     D3D12_VERTEX_BUFFER_VIEW vbv = {};
-    vbv.BufferLocation = s->uploadVB->GetGPUVirtualAddress();
+    vbv.BufferLocation = gpu;
     vbv.SizeInBytes = needed;
     vbv.StrideInBytes = stride;
 
@@ -371,6 +397,7 @@ void d3d12_setColorTransform(RhiInstance* r, const float m[16]) {
 
 static const char* kTexHLSL12 =
     "cbuffer Xform : register(b0) { float4 uRows[4]; };\n"
+    "cbuffer Alpha : register(b1) { float4 uAlpha; };\n"  // .x = alpha-test ref (<0 = off)
     "Texture2D uTex : register(t0);\n"
     "SamplerState uSamp : register(s0);\n"
     "struct VSIn  { float3 pos : POSITION; float4 col : COLOR; float2 uv : TEXCOORD; };\n"
@@ -378,14 +405,17 @@ static const char* kTexHLSL12 =
     "VSOut vsmain(VSIn i){ float4 p = float4(i.pos,1.0); VSOut o;\n"
     "  o.pos = float4(dot(uRows[0],p), dot(uRows[1],p), dot(uRows[2],p), dot(uRows[3],p));\n"
     "  o.col = i.col; o.uv = i.uv; return o; }\n"
-    "float4 psmain(VSOut i) : SV_Target { return i.col * uTex.Sample(uSamp, i.uv); }\n";
+    "float4 psmain(VSOut i) : SV_Target {\n"
+    "  float4 c = i.col * uTex.Sample(uSamp, i.uv);\n"
+    "  clip(c.a - uAlpha.x);\n"
+    "  return c; }\n";
 
 bool buildTexPipeline12(D3d12Instance* s) {
     if (s->texPipelineReady) return true;
 
     D3D12_DESCRIPTOR_HEAP_DESC hd = {};
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    hd.NumDescriptors = 256;
+    hd.NumDescriptors = 4096;   // one SRV per loaded texture (terrain + object models)
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(s->device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&s->srvHeap)))) return false;
     s->srvDescSize = s->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -395,7 +425,7 @@ bool buildTexPipeline12(D3d12Instance* s) {
     srvRange.NumDescriptors = 1;
     srvRange.BaseShaderRegister = 0; // t0
 
-    D3D12_ROOT_PARAMETER params[2] = {};
+    D3D12_ROOT_PARAMETER params[3] = {};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     params[0].Constants.ShaderRegister = 0; // b0
     params[0].Constants.Num32BitValues = 16;
@@ -404,6 +434,10 @@ bool buildTexPipeline12(D3d12Instance* s) {
     params[1].DescriptorTable.NumDescriptorRanges = 1;
     params[1].DescriptorTable.pDescriptorRanges = &srvRange;
     params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[2].Constants.ShaderRegister = 1; // b1 (alpha-test ref)
+    params[2].Constants.Num32BitValues = 4;
+    params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     D3D12_STATIC_SAMPLER_DESC samp = {};
     samp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -413,7 +447,7 @@ bool buildTexPipeline12(D3d12Instance* s) {
     samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     D3D12_ROOT_SIGNATURE_DESC rsd = {};
-    rsd.NumParameters = 2;
+    rsd.NumParameters = 3;
     rsd.pParameters = params;
     rsd.NumStaticSamplers = 1;
     rsd.pStaticSamplers = &samp;
@@ -450,6 +484,17 @@ bool buildTexPipeline12(D3d12Instance* s) {
     pd.DSVFormat = DXGI_FORMAT_D32_FLOAT;
     pd.SampleDesc.Count = 1;
     if (FAILED(s->device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&s->psoTex)))) return false;
+
+    // Blend variant: src-over alpha blend, depth test on but writes off (translucent geometry).
+    pd.BlendState.RenderTarget[0].BlendEnable    = TRUE;
+    pd.BlendState.RenderTarget[0].SrcBlend       = D3D12_BLEND_SRC_ALPHA;
+    pd.BlendState.RenderTarget[0].DestBlend      = D3D12_BLEND_INV_SRC_ALPHA;
+    pd.BlendState.RenderTarget[0].BlendOp        = D3D12_BLEND_OP_ADD;
+    pd.BlendState.RenderTarget[0].SrcBlendAlpha  = D3D12_BLEND_ONE;
+    pd.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+    pd.BlendState.RenderTarget[0].BlendOpAlpha   = D3D12_BLEND_OP_ADD;
+    pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    if (FAILED(s->device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&s->psoTexBlend)))) return false;
 
     s->texPipelineReady = true;
     return true;
@@ -556,31 +601,24 @@ void d3d12_drawTextured(RhiInstance* r, const RhiTexVertex* verts, uint32_t coun
 
     const UINT stride = (UINT)sizeof(RhiTexVertex);
     const UINT needed = stride * count;
-    if (needed > s->uploadCap) {
-        if (s->uploadVB) { s->uploadVB->Unmap(0, nullptr); s->uploadVB.Reset(); s->mappedVB = nullptr; }
-        D3D12_HEAP_PROPERTIES hp = {}; hp.Type = D3D12_HEAP_TYPE_UPLOAD;
-        D3D12_RESOURCE_DESC rd = {};
-        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; rd.Width = needed; rd.Height = 1;
-        rd.DepthOrArraySize = 1; rd.MipLevels = 1; rd.Format = DXGI_FORMAT_UNKNOWN;
-        rd.SampleDesc.Count = 1; rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        if (FAILED(s->device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
-                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&s->uploadVB)))) return;
-        D3D12_RANGE none = {0, 0};
-        if (FAILED(s->uploadVB->Map(0, &none, &s->mappedVB))) { s->uploadVB.Reset(); return; }
-        s->uploadCap = needed;
-    }
-    memcpy(s->mappedVB, verts, needed);
+    D3D12_GPU_VIRTUAL_ADDRESS gpu; void* cpu;
+    if (!ringAlloc(s, needed, &gpu, &cpu)) return;   // frame overflow: ring grows next frame
+    memcpy(cpu, verts, needed);
 
     D3D12_VERTEX_BUFFER_VIEW vbv = {};
-    vbv.BufferLocation = s->uploadVB->GetGPUVirtualAddress();
+    vbv.BufferLocation = gpu;
     vbv.SizeInBytes = needed; vbv.StrideInBytes = stride;
+
+    int mode = r->alphaMode;
+    float alpha4[4] = { (mode == RHI_ALPHA_TEST) ? 0.5f : -1.0f, 0, 0, 0 };
 
     ID3D12DescriptorHeap* heaps[] = { s->srvHeap.Get() };
     s->cmdList->SetDescriptorHeaps(1, heaps);
     s->cmdList->SetGraphicsRootSignature(s->rootSigTex.Get());
     s->cmdList->SetGraphicsRoot32BitConstants(0, 16, s->mvp, 0);
     s->cmdList->SetGraphicsRootDescriptorTable(1, s->curTexGpu);
-    s->cmdList->SetPipelineState(s->psoTex.Get());
+    s->cmdList->SetGraphicsRoot32BitConstants(2, 4, alpha4, 0);
+    s->cmdList->SetPipelineState(mode == RHI_ALPHA_BLEND ? s->psoTexBlend.Get() : s->psoTex.Get());
     s->cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     s->cmdList->IASetVertexBuffers(0, 1, &vbv);
     s->cmdList->DrawInstanced(count, 1, 0, 0);
