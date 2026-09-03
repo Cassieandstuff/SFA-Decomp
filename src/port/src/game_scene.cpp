@@ -50,6 +50,7 @@ extern "C" {
     // spawned object system (object.c)
     void** gObjList; int gObjCount;
     void* Obj_GetActiveModel(void* obj);
+    void* stairfax_spawn_player(int seq, float x, float y, float z);  // port-side player spawn
     // host input (pad_input.c)
     int padGetStickX(int); int padGetStickY(int);
     int padGetCX(int);     int padGetCY(int);
@@ -79,6 +80,13 @@ float gCamPos[3];
 float gCamYaw = 0.0f;
 float gCamPitch = 0.35f;
 bool  gCamPlaced = false;
+
+// playable character (interim, port-side controller; real player.c not compiled yet)
+uint8_t* gPlayerObj = nullptr;   // the spawned Sabre/Krystal GameObject
+float    gFollowYaw = 0.0f;      // third-person camera orbit yaw (C-stick)
+float    gFollowPitch = -0.28f;  // look slightly down at the character
+float    gPlayerAnimPhase = 0.0f;// walk-cycle phase, advanced by movement speed
+bool     gPlayerMoving = false;
 
 void setupVtxFormats() {
     GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS,  GX_POS_XYZ,  GX_S16,   0);
@@ -592,7 +600,53 @@ void loadScene() {
            binPath, gBlocks.size(), texOK, texTot, gWorldR);
 }
 
+// Port-side player controller: move the spawned GameObject camera-relative and face it
+// toward motion. Y is left at the spawn height (no collision yet - ground-clamp is next).
+void updatePlayer() {
+    if (!gPlayerObj) return;
+    uint8_t* o = gPlayerObj;
+    float lx = padGetStickX(0)/100.0f, ly = padGetStickY(0)/100.0f;
+    float mag = sqrtf(lx*lx + ly*ly);
+    gPlayerMoving = (mag > 0.25f);
+    if (gPlayerMoving) {
+        float sy=sinf(gFollowYaw), cyw=cosf(gFollowYaw);
+        // camera-relative basis on the yaw plane (matches the view-forward convention below)
+        float fwd[3]={-sy,0,cyw}, rgt[3]={cyw,0,sy};
+        float dx = fwd[0]*ly + rgt[0]*lx, dz = fwd[2]*ly + rgt[2]*lx;
+        float dl = sqrtf(dx*dx+dz*dz); if (dl>1e-4f){ dx/=dl; dz/=dl; }
+        float speed = getenv("STAIRFAX_PLAYER_SPEED") ? (float)atof(getenv("STAIRFAX_PLAYER_SPEED")) : 14.0f;
+        float step = speed * (mag>1.0f?1.0f:mag);
+        *(float*)(o+0x0C) += dx*step;   // anim.localPosX
+        *(float*)(o+0x14) += dz*step;   // anim.localPosZ
+        // face movement direction; SFA anim.rotX is s16 (full turn = 65536). Tunable offset
+        // (degrees) since the model's neutral forward axis isn't known a priori.
+        float faceOff = getenv("STAIRFAX_PLAYER_FACE") ? (float)atof(getenv("STAIRFAX_PLAYER_FACE")) : 0.0f;
+        float heading = atan2f(dx, dz) + faceOff*(3.14159265f/180.0f);
+        *(int16_t*)(o+0x00) = (int16_t)lroundf(heading/(2.0f*3.14159265f)*65536.0f);
+        float aspd = getenv("STAIRFAX_PLAYER_ANIMSPEED") ? (float)atof(getenv("STAIRFAX_PLAYER_ANIMSPEED")) : 0.6f;
+        gPlayerAnimPhase += aspd * (mag>1.0f?1.0f:mag);
+    }
+}
+
 void updateCamera() {
+    // Third-person follow of the spawned player character.
+    if (gPlayerObj && getenv("STAIRFAX_PLAYER")) {
+        float cx = padGetCX(0)/100.0f, cy = padGetCY(0)/100.0f;
+        gFollowYaw   += cx * 0.045f;
+        gFollowPitch += cy * 0.03f;
+        if (gFollowPitch >  0.55f) gFollowPitch =  0.55f;
+        if (gFollowPitch < -0.90f) gFollowPitch = -0.90f;
+        float dist  = getenv("STAIRFAX_PLAYER_CAMDIST") ? (float)atof(getenv("STAIRFAX_PLAYER_CAMDIST")) : 340.0f;
+        float lookH = getenv("STAIRFAX_PLAYER_CAMHEIGHT") ? (float)atof(getenv("STAIRFAX_PLAYER_CAMHEIGHT")) : 55.0f;
+        float px=*(float*)(gPlayerObj+0x0C), py=*(float*)(gPlayerObj+0x10), pz=*(float*)(gPlayerObj+0x14);
+        float tgt[3]={px, py+lookH, pz};
+        float cp=cosf(gFollowPitch), sp=sinf(gFollowPitch), sy=sinf(gFollowYaw), cyw=cosf(gFollowYaw);
+        // view-forward for sceneRender's Rot=Rx(pitch)*Ry(yaw) convention (row 2 of Rot).
+        float viewFwd[3]={ -sy*cp, sp, cyw*cp };
+        for (int k=0;k<3;++k) gCamPos[k]=tgt[k]-viewFwd[k]*dist;
+        gCamYaw=gFollowYaw; gCamPitch=gFollowPitch; gCamPlaced=true;
+        return;
+    }
     if (!gCamPlaced) {
         float dist = gWorldR * 2.0f;
         gCamPos[0]=gWorldCtr[0];
@@ -708,6 +762,18 @@ extern "C" void sceneRender(int a, int b, int c, int d, int e, int f) {
                 gCamPlaced=false; }
             fprintf(stderr,"[spawn] reframed on %d objects, worldR=%.0f\n", nf, gWorldR);
         }
+        // Playable character: spawn the real Sabre/Krystal object at the object-cloud centroid
+        // (interim - the real per-map save spawn point needs the save/map-event subsystem). It
+        // joins gObjList and renders through the spawn loop; a port-side controller drives it.
+        if (getenv("STAIRFAX_PLAYER")) {
+            ensureModelCaches();   // loadCharacter's internal ObjModel_Load needs the caches up
+            int seq = getenv("STAIRFAX_PLAYER_CHAR") ? atoi(getenv("STAIRFAX_PLAYER_CHAR")) : 0x1F; // Krystal
+            float px=gWorldCtr[0], py=gWorldCtr[1], pz=gWorldCtr[2];
+            if (const char* ppos = getenv("STAIRFAX_PLAYER_POS"))
+                sscanf(ppos, "%f,%f,%f", &px, &py, &pz);
+            gPlayerObj = (uint8_t*)stairfax_spawn_player(seq, px, py, pz);
+            gFollowYaw = 0.0f; gCamPlaced = false;
+        }
         if (const char* mm = getenv("STAIRFAX_MODEL_TEST")) {
             extern void* ObjModel_Load(int id, int loadFlag, int* outSize);
             extern int stairfax_model_scan(int want);
@@ -734,6 +800,7 @@ extern "C" void sceneRender(int a, int b, int c, int d, int e, int f) {
     float skyB = stairfax_sky_tick();
     vi_set_clear_color(0.02f + skyB * 0.28f, 0.03f + skyB * 0.47f, 0.06f + skyB * 0.74f);
 
+    updatePlayer();   // move the character (camera-relative) before framing the camera on it
     updateCamera();
 
     const int W=1280, H=720;
@@ -813,6 +880,7 @@ extern "C" void sceneRender(int a, int b, int c, int d, int e, int f) {
         static int logged = 0;
         for (int i = 0; i < gObjCount; ++i) {
             uint8_t* o = (uint8_t*)gObjList[i];
+            if (o == gPlayerObj) continue;   // player rendered separately (dedicated harness)
             void* om = Obj_GetActiveModel(o);
             uint8_t* h = om ? *(uint8_t**)om : nullptr;   // ObjModel.file (offset 0)
             uint8_t* def = *(uint8_t**)(o + 0x50);        // anim.modelInstance = ObjDef
@@ -879,6 +947,52 @@ extern "C" void sceneRender(int a, int b, int c, int d, int e, int f) {
             if (!animated) renderModel(dm, camView);
         }
         logged = 1;
+    }
+
+    // Player: dedicated render + animation with its own harness, so the walk cycle runs
+    // continuously and idle/walk move selection is under the controller's control.
+    if (gPlayerObj) {
+        ensureModelCaches();
+        uint8_t* o = gPlayerObj;
+        void* om = Obj_GetActiveModel(o);
+        uint8_t* h = om ? *(uint8_t**)om : nullptr;
+        uint8_t* def = *(uint8_t**)(o + 0x50);
+        int32_t* mids = def ? *(int32_t**)(def + 0x08) : nullptr;
+        int mcnt = def ? def[0x55] : 0;
+        if (!h && mcnt > 0 && mids && mids[0] > 0) {   // DLL-gated bank empty -> port-side direct load
+            static int pid = -1; static uint8_t* phdr = nullptr;
+            if (pid != mids[0]) { pid = mids[0];
+                phdr = (uint8_t*)stairfax_objmodel_load_guarded(pid);
+                if (!phdr) phdr = (uint8_t*)stairfax_model_load_static(-pid);
+                if (phdr) stairfax_bswap_model_moves(phdr); }
+            h = phdr;
+        }
+        if (h) {
+            DispModel dm; dm.h = h;
+            dm.scale = getenv("STAIRFAX_PLAYER_SCALE") ? (float)atof(getenv("STAIRFAX_PLAYER_SCALE")) : 1.0f;
+            dm.wx=*(float*)(o+0x0C); dm.wy=*(float*)(o+0x10); dm.wz=*(float*)(o+0x14);
+            int mc = *(uint16_t*)(h + 0xEC);
+            uint8_t** md = *(uint8_t***)(h + 0x64);
+            static int loggedP = 0;
+            if (!loggedP) { fprintf(stderr,"[player] model=%d moveCount=%d jc=%d\n", mids?mids[0]:-1, mc, h[0xF3]); loggedP=1; }
+            int idleMove = getenv("STAIRFAX_PLAYER_IDLE") ? atoi(getenv("STAIRFAX_PLAYER_IDLE")) : 0;
+            int walkMove = getenv("STAIRFAX_PLAYER_WALK") ? atoi(getenv("STAIRFAX_PLAYER_WALK")) : idleMove;
+            int moveIdx = gPlayerMoving ? walkMove : idleMove;
+            if (mc > 0 && md) {
+                if (moveIdx < 0 || moveIdx >= mc) moveIdx = 0;
+                if (md[moveIdx]) {
+                    static AnimHarness PH; static uint8_t* phHdr = nullptr;
+                    if (phHdr != h) { harnessSetup(&PH, h); phHdr = h; }
+                    uint8_t* atl = md[moveIdx]; float flen = atl ? (float)atl[7] : 1.0f; if (flen < 1) flen = 1;
+                    float ph = gPlayerMoving ? gPlayerAnimPhase : (gFrameCounter * 0.05f);
+                    float progress = fmodf(ph, flen) / flen;
+                    Object_ObjAnimSetMove(PH.objAnim, moveIdx, progress, 0);
+                    *(uint16_t*)(PH.state + 0x58) = 0;
+                    modelAnimEvalChannels((uint8_t*)PH.dst, PH.objModel, PH.state, progress, 0x7f);
+                    renderModel(dm, camView, PH.dst);
+                } else renderModel(dm, camView);
+            } else renderModel(dm, camView);
+        }
     }
 
     VIWaitForRetrace();   // interim present point (see file header)

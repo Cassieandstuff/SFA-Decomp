@@ -35,8 +35,16 @@ static unsigned char* gModelsTab; static int gModelsTabSize;   // per-dir (viewe
 static unsigned char* gModelsBin; static int gModelsBinSize;
 static unsigned char* gRootModelsTab; static int gRootModelsTabSize;   // root/global (objects)
 static unsigned char* gRootModelsBin; static int gRootModelsBinSize;
+// The retail runtime MODELS table is a MERGE of slot A (current area) and slot B (a resident
+// "common"/character map = warlock). Player/common models (ids ~1256/1257) are empty in every
+// area table but flagged (0x10000000) in warlock/MODELS.tab, and the merge redirects their data
+// read to warlock/MODELS.bin (fileId 0x46). The port models warlock as the slot-B fallback.
+static unsigned char* gCommonModelsTab; static int gCommonModelsTabSize;
+static unsigned char* gCommonModelsBin; static int gCommonModelsBinSize;
+#define STAIRFAX_COMMON_MODEL_DIR "warlock"
 static int gUsePerDir;      // viewer opts in; objects leave it 0 -> root
-static int gModelSrcRoot;   // set by getTableFileEntry: 1 = last entry came from root
+static int gModelSrc;   // set by getTableFileEntry: 0=perdir(area), 1=root/global, 2=common(warlock)
+static const char* modelSrcName(void) { return gModelSrc==2?"common":gModelSrc==1?"root":"perdir"; }
 void stairfax_model_perdir(int on) { gUsePerDir = on; }
 
 // --- anim data pipeline (MODANIM/AMAP global, ANIM per-dir) ------------------
@@ -88,6 +96,9 @@ static void modelsEnsureLoaded(void) {
     // root/global model table - where objects' modelFileIds resolve
     if (!gRootModelsTab) gRootModelsTab = (unsigned char*)loadFileByPath((char*)"MODELS.tab", &gRootModelsTabSize, 0);
     if (!gRootModelsBin) gRootModelsBin = (unsigned char*)loadFileByPath((char*)"MODELS.bin", &gRootModelsBinSize, 0);
+    // slot-B / common (warlock) models - holds the flagged player/common records
+    if (!gCommonModelsTab) gCommonModelsTab = (unsigned char*)loadFileByPath((char*)STAIRFAX_COMMON_MODEL_DIR "/MODELS.tab", &gCommonModelsTabSize, 0);
+    if (!gCommonModelsBin) gCommonModelsBin = (unsigned char*)loadFileByPath((char*)STAIRFAX_COMMON_MODEL_DIR "/MODELS.bin", &gCommonModelsBinSize, 0);
     animFilesEnsureLoaded(dir);
 }
 // Find the "ZLB" block within maxScan bytes (models have a small metadata prefix).
@@ -184,7 +195,8 @@ static unsigned modelsTabEntry(const unsigned char* tab, int tabSize, int index)
 }
 // The .bin matching the source the last getTableFileEntry resolved.
 static const unsigned char* curModelsBin(int* sz) {
-    if (gModelSrcRoot) { *sz = gRootModelsBinSize; return gRootModelsBin; }
+    if (gModelSrc == 2) { *sz = gCommonModelsBinSize; return gCommonModelsBin; }
+    if (gModelSrc == 1) { *sz = gRootModelsBinSize;   return gRootModelsBin; }
     *sz = gModelsBinSize; return gModelsBin;
 }
 
@@ -194,21 +206,23 @@ int getTableFileEntry(int fileId, int index, int* out) {
     if (fileId != 0x2a) { if (out) *out = 0; return 0; }
     modelsEnsureLoaded();
     unsigned e = 0;
-    if (gUsePerDir && (e = modelsTabEntry(gModelsTab, gModelsTabSize, index))) gModelSrcRoot = 0;
-    else if ((e = modelsTabEntry(gRootModelsTab, gRootModelsTabSize, index)))  gModelSrcRoot = 1;
-    else if ((e = modelsTabEntry(gModelsTab, gModelsTabSize, index)))          gModelSrcRoot = 0;
+    // Merge order (mirrors mergeTableFiles' A-then-B rule): area/root first, then the resident
+    // common (warlock) slot B for the player/common records the area tables leave empty.
+    if (gUsePerDir && (e = modelsTabEntry(gModelsTab, gModelsTabSize, index)))     gModelSrc = 0;
+    else if ((e = modelsTabEntry(gRootModelsTab, gRootModelsTabSize, index)))       gModelSrc = 1;
+    else if ((e = modelsTabEntry(gModelsTab, gModelsTabSize, index)))               gModelSrc = 0;
+    else if ((e = modelsTabEntry(gCommonModelsTab, gCommonModelsTabSize, index)))   gModelSrc = 2;
     if (!e) {
         if (getenv("STAIRFAX_MODEL_TEST"))
-            fprintf(stderr, "[model] tab[%d] MISS (rootTab=%p sz=%d root[i]=0x%x perdir=%p)\n",
-                    index, (void*)gRootModelsTab, gRootModelsTabSize,
+            fprintf(stderr, "[model] tab[%d] MISS (root[i]=0x%x common[i]=0x%x)\n", index,
                     (gRootModelsTab && (index+1)*4<=gRootModelsTabSize) ? (unsigned)beRead32(gRootModelsTab+index*4) : 0,
-                    (void*)gModelsTab);
+                    (gCommonModelsTab && (index+1)*4<=gCommonModelsTabSize) ? (unsigned)beRead32(gCommonModelsTab+index*4) : 0);
         return 0;
     }
     if (out) *out = (int)e;
     if (getenv("STAIRFAX_MODEL_TEST"))
         fprintf(stderr, "[model] tab[%d]=0x%08x (off=0x%x) src=%s\n",
-                index, (int)e, e & 0x0fffffff, gModelSrcRoot ? "root" : "perdir");
+                index, (int)e, e & 0x0fffffff, modelSrcName());
     return 1;
 }
 
@@ -253,7 +267,7 @@ void* loadAndDecompressDataFile(int fileId, void* dst, int offsetFlags, unsigned
     int binSize; const unsigned char* bin = curModelsBin(&binSize);
     if (!bin || !dst || off >= (unsigned)binSize) return dst;
     int z = findZLB(bin + off, 0x40);
-    if (z < 0) { if (getenv("STAIRFAX_MODEL_TEST")) fprintf(stderr, "[model] no ZLB at 0x%x (src=%s)\n", off, gModelSrcRoot?"root":"perdir"); return dst; }
+    if (z < 0) { if (getenv("STAIRFAX_MODEL_TEST")) fprintf(stderr, "[model] no ZLB at 0x%x (src=%s)\n", off, modelSrcName()); return dst; }
     const unsigned char* zlb = bin + off + z;
     unsigned csize = beRead32(zlb + 0xc);
     size_t got = 0;

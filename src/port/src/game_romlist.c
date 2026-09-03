@@ -15,6 +15,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <windows.h>
 
 // Spawn one placement, guarded: object types that hit a not-yet-ported subsystem (a
@@ -105,6 +106,46 @@ int stairfax_romlist_spawn(int mapId, const char* mapName, int maxCount) {
     fprintf(stderr, "[spawn] map %d (%s): tried %d, spawned %d, gObjCount %d -> %d\n",
             mapId, mapName, tried, spawned, before, gObjCount);
     return spawned;
+}
+
+// Spawn the player character (Sabre seq 0x00 / Krystal seq 0x1F) the way the real
+// mapSetupPlayer does: fabricate a CharSpawn (same byte layout as an ObjPlacement, but
+// constructed in host order - no byte-swap) and hand it to the real loadCharacter with
+// flags&1, which loads the real character model/anims AND appends the object to gObjList.
+// Guarded: some character-DLL setup hooks are stubbed in the port, so catch any fault and
+// return NULL rather than take down the frame. Returns the GameObject, or NULL.
+extern void* loadCharacter(short* data, int flags, int a2, int a3, void* parent, int unused);
+static DWORD gPlayerFaultCode; static void* gPlayerFaultAddr;
+static int playerFaultFilter(EXCEPTION_POINTERS* ep) {
+    gPlayerFaultCode = ep->ExceptionRecord->ExceptionCode;
+    gPlayerFaultAddr = ep->ExceptionRecord->ExceptionAddress;
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+void* stairfax_spawn_player(int seq, float x, float y, float z) {
+    // Ensure OBJECTS.bin is registered so loadObjectFile can read the character def by id.
+    { void* ob = 0; loadAssetFileById(&ob, 0x3e);
+      if (ob) dvd_register_buffer(0x3e, ob, getDataFileSize(0x3e));
+      else { fprintf(stderr, "[player] OBJECTS.bin not loaded\n"); return 0; } }
+
+    unsigned char spawn[0x18];
+    memset(spawn, 0, sizeof spawn);
+    // CharSpawn: id s16@0, size u8@2=0x18, unk4@4=1, unk5@5=4, unk6@6=0xff, unk7@7=0xff,
+    // x@8, y@0xC, z@0x10, mapId@0x14=-1 (mirrors object.c mapSetupPlayer).
+    *(short*)(spawn + 0) = (short)seq;
+    spawn[2] = 0x18; spawn[4] = 1; spawn[5] = 4; spawn[6] = 0xff; spawn[7] = 0xff;
+    *(float*)(spawn + 8) = x; *(float*)(spawn + 0xC) = y; *(float*)(spawn + 0x10) = z;
+    *(int*)(spawn + 0x14) = -1;
+
+    void* obj = 0;
+    __try { obj = loadCharacter((short*)spawn, 1, -1, -1, 0, 0); }
+    __except (playerFaultFilter(GetExceptionInformation())) {
+        HMODULE hm = GetModuleHandleA(NULL);
+        fprintf(stderr, "[player] loadCharacter FAULT code=0x%08lx addr=%p rva=0x%tx\n",
+                gPlayerFaultCode, gPlayerFaultAddr, (char*)gPlayerFaultAddr - (char*)hm);
+        obj = 0;
+    }
+    fprintf(stderr, "[player] spawn seq=0x%x at (%.0f,%.0f,%.0f) -> %p\n", seq, x, y, z, obj);
+    return obj;
 }
 
 int stairfax_romlist_dump(int mapId, int maxLog) {
