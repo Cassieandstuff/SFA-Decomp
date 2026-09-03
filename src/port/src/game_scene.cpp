@@ -341,6 +341,7 @@ static void renderModel(const DispModel& dm, const float camView[3][4],
     // vertex; consume them and apply per-joint bind-pose offsets (below) so skinned verts land
     // at their bone positions instead of collapsing to the origin.
     int pnmtx = (jointCount > 1) ? (1 + texMtxCount) : 0;
+    if (pnmtx && getenv("STAIRFAX_MODEL_PNMTX")) pnmtx = atoi(getenv("STAIRFAX_MODEL_PNMTX")); // diag override
     if (getenv("STAIRFAX_MODEL_DBG"))
         fprintf(stderr, "[rm] jc=%d texMtx=%d pnmtx=%d renderOps=%d dlCount=%d\n",
                 jointCount, texMtxCount, pnmtx, renderOpCount, dlCount);
@@ -459,6 +460,11 @@ static void renderModel(const DispModel& dm, const float camView[3][4],
 
             int posOff = pnmtx;
             int descStride = pnmtx + posSz + (nrmP?nrmSz:0) + (clrP?clrSz:0) + layerCount*texSz;
+            if (getenv("STAIRFAX_MODEL_DBG") && jointCount>=20) { static int nlog=0; if(nlog<40){ nlog++;
+                int okv = validateStride(dl, dls, posOff, posSz, descStride, vc);
+                int det = okv ? descStride : detectStride(dl, dls, vc, posOff, posSz);
+                fprintf(stderr, "[rm] DL %d: dls=%d posOff=%d posSz=%d nrmP=%d clrP=%d layerCount=%d texSz=%d descStride=%d valid=%d detected=%d vc=%d\n",
+                        dlIdx, dls, posOff, posSz, nrmP, clrP, layerCount, texSz, descStride, okv, det, vc); }}
 
             // Per-slot skin: full FK matrices under the anim test, else the bind-pose offset.
             if (pnmtx && animTest) {
@@ -978,7 +984,8 @@ extern "C" void sceneRender(int a, int b, int c, int d, int e, int f) {
             int idleMove = getenv("STAIRFAX_PLAYER_IDLE") ? atoi(getenv("STAIRFAX_PLAYER_IDLE")) : 0;
             int walkMove = getenv("STAIRFAX_PLAYER_WALK") ? atoi(getenv("STAIRFAX_PLAYER_WALK")) : idleMove;
             int moveIdx = gPlayerMoving ? walkMove : idleMove;
-            if (mc > 0 && md) {
+            if (getenv("STAIRFAX_PLAYER_STATIC")) { renderModel(dm, camView); }  // bind pose (no anim) - diagnostic
+            else if (mc > 0 && md) {
                 if (moveIdx < 0 || moveIdx >= mc) moveIdx = 0;
                 if (md[moveIdx]) {
                     static AnimHarness PH; static uint8_t* phHdr = nullptr;
