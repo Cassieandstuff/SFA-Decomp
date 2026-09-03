@@ -1,9 +1,15 @@
 // mm_shim.c - host implementation of the game's memory manager (main/mm.h).
 //
-// The console mm carves fixed heaps out of the boot arena; the host maps mmAlloc
-// onto malloc. Allocations are 32-byte aligned (the game assumes this for DVD
-// reads) and carry a small header so mm_free and getHeapItemSize work. The heap
-// "type"/"flag"/region knobs are inert on the host - one flat allocator.
+// The real src/main/mm.c can't be compiled on host: it aliases three named .bss
+// globals as one MmGlobalLayout via (MmGlobalLayout*)gMmStoreArray, reading regions
+// at +0x3F00 past a 0x80-byte array - a GameCube link-order overlay (same hazard as
+// pad.c) that isn't reconstructable byte-neutrally. So we reimplement mm's OBSERVABLE
+// contract cleanly: mmAlloc onto malloc, 32-byte aligned (the game assumes this for
+// DVD reads), with a header so mm_free/getHeapItemSize work. The type/flag/region
+// knobs are inert (one flat allocator), but the DEFERRED-FREE timing is faithful:
+// mmFreeDeferred holds a pointer for gMmFreeDelay ticks before actually freeing, so
+// game code that keeps using a "freed" pointer for a few frames stays valid (matching
+// the console) instead of hitting a use-after-free.
 
 #include "main/mm.h"
 
@@ -43,9 +49,36 @@ void mm_free(void* ptr) {
 }
 
 void  mmFree(void* p)          { mm_free(p); }
-void  mmFreeDeferred(void* p)  { mm_free(p); }
-void  mmFreeTick(int arg)      { (void)arg; }
-void  mmInit(void)             { }
+
+// --- deferred free: hold pointers gMmFreeDelay ticks before actually freeing ----
+// The console defers so callers can keep touching a "freed" buffer for a few frames.
+#define MM_DEFERRED_CAP 4096
+static struct { void* ptr; int delay; } sDeferred[MM_DEFERRED_CAP];
+static int sDeferredCount;
+static int sFreeDelay = 2; // console default (mmInit sets gMmFreeDelay = 2)
+
+void mmFreeDeferred(void* p) {
+    if (!p) return;
+    if (sDeferredCount >= MM_DEFERRED_CAP) { mm_free(p); return; } // overflow: free now
+    sDeferred[sDeferredCount].ptr = p;
+    sDeferred[sDeferredCount].delay = sFreeDelay > 0 ? sFreeDelay : 1;
+    sDeferredCount++;
+}
+
+void mmFreeTick(int arg) {
+    (void)arg;
+    int i = 0;
+    while (i < sDeferredCount) {
+        if (--sDeferred[i].delay <= 0) {
+            mm_free(sDeferred[i].ptr);
+            sDeferred[i] = sDeferred[--sDeferredCount]; // swap-remove (matches mm.c)
+        } else {
+            i++;
+        }
+    }
+}
+
+void  mmInit(void)             { sDeferredCount = 0; sFreeDelay = 2; }
 
 int getHeapItemSize(void* ptr) {
     if (!ptr) return 0;
@@ -61,7 +94,7 @@ int roundUpTo16(int v) { return (v + 15) & ~15; }
 int roundUpTo32(int v) { return (v + 31) & ~31; }
 
 // --- heap mode knobs (inert on host) ---------------------------------------
-int mmSetFreeDelay(int v)               { (void)v; return 0; }
+int mmSetFreeDelay(int v)               { int old = sFreeDelay; sFreeDelay = v; return old; }
 int testAndSet_onlyUseHeaps1and2(int v) { (void)v; return 0; }
 int testAndSet_onlyUseHeap3(int v)      { (void)v; return 0; }
 int mmGetRegionForPtr(u8* ptr)          { (void)ptr; return 0; }

@@ -1,0 +1,69 @@
+// game_object_stubs.c - link stand-ins for object.c's siblings (objhits/objanim/objlib/
+// objprint/player/map/model/math), so the real object.c links. The object vertical slice
+// exercises only Obj_InitObjectSystem + Obj_UpdateAllObjects over an EMPTY object list, so
+// none of the per-object helpers below are reached at runtime; they only need to LINK. As
+// real objects get spawned, replace these with the real TUs one at a time. Headerless
+// (bare-symbol linkage) to avoid signature conflicts, like game_boot_stubs.c.
+
+
+// data globals object.c reads (player/map offsets)
+float gMapSavedPlayerOffsetX;
+float gMapSavedPlayerOffsetZ;
+float playerMapOffsetX;
+float playerMapOffsetZ;
+
+// function stubs
+int AudioStream_StopAll(void) { return 0; }
+int ObjContact_RemoveObjectCallbacks(void) { return 0; }
+int ObjHitReact_InitState(void) { return 0; }
+int ObjHitReact_ResetActiveObjects(void) { return 0; }
+int ObjHitReact_UpdateResetObjects(void) { return 0; }
+int ObjHitbox_AllocRotatedBounds(void) { return 0; }
+int ObjHits_AllocObjectState(void) { return 0; }
+int ObjHits_InitWorkBuffers(void) { return 0; }
+int ObjHits_ResetWorkBuffers(void) { return 0; }
+int ObjHits_TickPriorityHitCooldowns(void) { return 0; }
+int ObjHits_Update(void) { return 0; }
+int Obj_BuildTransformMatrixSlot(void) { return 0; }
+int Obj_GetWorldPosition(void) { return 0; }
+int Obj_TransformLocalPointToWorld(void) { return 0; }
+int PSMTXMultVec(void) { return 0; }
+int PSMTXRotAxisRad(void) { return 0; }
+int PSVECCrossProduct(void) { return 0; }
+int Sfx_PlayFromObject(void) { return 0; }
+int Sfx_RemoveLoopedObjectSoundForObject(void) { return 0; }
+int Sfx_StopObjectChannel(void) { return 0; }
+int basisVectorsToEulerAngles(void) { return 0; }
+int debugPrintf(void) { return 0; }
+int getCurMapType(void) { return 0; }
+int getCurUiDll(void) { return 0; }
+int getTabEntry(void) { return 0; }
+int intersectModLineBuild(void) { return 0; }
+int mapLoadForObject(void) { return 0; }
+int mapUnloadRomListPage(void) { return 0; }
+int mathSinf(void) { return 0; }
+int mtx44Transpose(void) { return 0; }
+int mtxRotateByVec3s(void) { return 0; }
+int newshadows_getSmallDiskTexture(void) { return 0; }
+int objAddObjectType(void) { return 0; }
+int objCausticReflectionRenderCb(void) { return 0; }
+int objFreeObjectType(void) { return 0; }
+// out-param: must zero *count (Obj_GetPlayerObject reads it before indexing).
+void* objGetAllOfType(int type, int* count) { (void)type; if (count) *count = 0; return 0; }
+int objGetObjectType(void) { return 0; }
+int objListAdd(void) { return 0; }
+int objListInit(void) { return 0; }
+int objList_remove(void) { return 0; }
+int objLoadPlayerFromSave(void) { return 0; }
+int objModelNormalDiskRenderCb(void) { return 0; }
+int objModelProjectedIndirectRenderCb(void) { return 0; }
+int objTypeInit(void) { return 0; }
+int playerDoHitDetection(void) { return 0; }
+int playerFree(void) { return 0; }
+int playerUpdate(void) { return 0; }
+int playerUpdateWhileTimeStopped(void) { return 0; }
+int setMatrixFromObjectTransposed(void) { return 0; }
+int shadowInit(void) { return 0; }
+int shadowVolumesSetDirty(void) { return 0; }
+int staffUpdateWhileTimeStopped(void) { return 0; }
+int trackTickDynamicSlotCooldowns(void) { return 0; }

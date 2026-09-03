@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-typedef struct GXRenderModeObj GXRenderModeObj; // from dolphin/gx
+typedef struct _GXRenderModeObj GXRenderModeObj; // from dolphin/gx (GXStruct.h)
 typedef struct RhiInstance RhiInstance;         // from renderer/rhi.h
 typedef struct PlatWindow  PlatWindow;          // from plat_window.h
 
@@ -33,6 +33,7 @@ RhiInstance* vi_host_rhi(void);      // the RHI instance VI created
 void*        vi_shim_getWindow(void); // native handle (HWND) for input shims
 void         vi_shim_pollEvents(void);
 int          vi_shim_shouldClose(void);
+void         vi_set_clear_color(float r, float g, float b); // frame clear tint (e.g. sky)
 
 #ifdef __cplusplus
 }

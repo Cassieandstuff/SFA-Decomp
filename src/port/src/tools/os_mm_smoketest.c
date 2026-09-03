@@ -64,6 +64,24 @@ int main(void) {
     check("AtomicSList pop LIFO order", AtomicSList_Pop(&list) == n2 && AtomicSList_Pop(&list) == n1);
     mm_free(n1); mm_free(n2);
 
+    // Deferred free: a pointer must survive gMmFreeDelay ticks, then be reclaimable.
+    // We can't observe the actual free directly, but we CAN observe that a deferred
+    // pointer stays writable across (delay-1) ticks and that mmFreeTick doesn't crash.
+    int prevDelay = mmSetFreeDelay(3);
+    (void)prevDelay;
+    void* dptr = mmAlloc(64, 0, 0);
+    check("deferred: alloc non-NULL", dptr != NULL);
+    memset(dptr, 0x5A, 64);
+    mmFreeDeferred(dptr);
+    mmFreeTick(0);  // delay 3 -> 2
+    check("deferred: valid after 1 tick", ((unsigned char*)dptr)[0] == 0x5A);
+    mmFreeTick(0);  // 2 -> 1
+    check("deferred: valid after 2 ticks", ((unsigned char*)dptr)[63] == 0x5A);
+    mmFreeTick(0);  // 1 -> 0: freed now (no crash, no double-free later)
+    check("deferred: tick past delay is safe", 1);
+    mmFreeTick(0);  // nothing queued: must be a safe no-op
+    check("deferred: extra tick safe", 1);
+
     printf("[os_mm_smoketest] %d passed, %d failed\n", gPass, gFail);
     return gFail ? 1 : 0;
 }

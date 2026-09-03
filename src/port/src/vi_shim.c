@@ -29,9 +29,30 @@ typedef struct ViState {
     VIRetraceCallback preCb;
     VIRetraceCallback postCb;
     void*            nextFrameBuffer;
+    bool             frameOpen;
 } ViState;
 
 static ViState gVi;
+
+// Open a frame for drawing: begin + clear to the current background. Game GX draws
+// (issued before the next VIWaitForRetrace) accumulate into this open frame; the
+// retrace then presents it. Clearing here - not at present - is what lets the
+// geometry survive to the screen.
+// Optional clear-color override (e.g. the sky day/night tint). Off until set.
+static int   gClearSet;
+static float gClearRGB[3];
+void vi_set_clear_color(float r, float g, float b) {
+    gClearRGB[0] = r; gClearRGB[1] = g; gClearRGB[2] = b; gClearSet = 1;
+}
+
+static void viOpenFrame(void) {
+    if (!gVi.initialized || gVi.frameOpen) return;
+    rhi_beginFrame(gVi.rhi);
+    if (gVi.black)      rhi_clear(gVi.rhi, 0.0f, 0.0f, 0.0f, 1.0f);
+    else if (gClearSet) rhi_clear(gVi.rhi, gClearRGB[0], gClearRGB[1], gClearRGB[2], 1.0f);
+    else                rhi_clear(gVi.rhi, 0.10f, 0.18f, 0.10f, 1.0f);
+    gVi.frameOpen = true;
+}
 
 static RhiBackend vi_pick_backend(void) {
     const char* g = getenv("STAIRFAX_GFX");
@@ -71,6 +92,7 @@ void VIInit(void) {
 
     gVi.initialized = true;
     printf("[vi] init: %s %dx%d\n", rhi_backendName(rhi_getBackend(gVi.rhi)), gVi.width, gVi.height);
+    viOpenFrame(); // first frame ready to receive draws
 }
 
 void VIConfigure(GXRenderModeObj* rmode) {
@@ -103,21 +125,20 @@ void VIWaitForRetrace(void) {
     // Pre-retrace callback: the game swaps display buffers here.
     if (gVi.preCb) gVi.preCb(gVi.retraceCount);
 
-    // Present one frame. Real framebuffer contents arrive with the GX draw path;
-    // until then, flat clear (black when blanked, otherwise a live indicator).
-    rhi_beginFrame(gVi.rhi);
-    if (gVi.black) {
-        rhi_clear(gVi.rhi, 0.0f, 0.0f, 0.0f, 1.0f);
-    } else {
-        rhi_clear(gVi.rhi, 0.10f, 0.18f, 0.10f, 1.0f);
-    }
+    // Present the frame the game just drew into (or a bare clear if it drew
+    // nothing). The GX draw path (gx_draw) has been filling this open frame.
+    if (!gVi.frameOpen) viOpenFrame();
     rhi_endFrame(gVi.rhi);
     rhi_present(gVi.rhi, gVi.swapchain);
+    gVi.frameOpen = false;
 
     // Post-retrace callback: the game runs its GPU error/metrics handler here.
     if (gVi.postCb) gVi.postCb(gVi.retraceCount);
 
     gVi.retraceCount++;
+
+    // Reopen a fresh frame so the next iteration's GX draws have somewhere to land.
+    viOpenFrame();
 }
 
 int VIGetNextField(void)  { return (int)(gVi.retraceCount & 1); }

@@ -68,8 +68,56 @@ OSTime OSGetTime(void) {
 }
 OSTick OSGetTick(void) { return (OSTick)OSGetTime(); }
 
+// --- MEM1 backing ----------------------------------------------------------
+// The console's 24MB MEM1 lives at the fixed physical/cached address 0x80000000,
+// and the game reads console globals (bus clock at 0x800000F8, console type, ...)
+// AND stores/sub-allocates through absolute 0x8xxxxxxx pointers. Rather than
+// rewrite every such access, we map MEM1 at its real address: on 64-bit Windows a
+// /LARGEADDRESSAWARE 32-bit process owns the full 4GB user range, so 0x80000000 is
+// reservable. Every absolute guest access then simply lands in real memory - the
+// most faithful backing, and it keeps stored guest pointers meaningful.
+//
+// The arena (framebuffers, GX FIFO, game heap) is carved from MEM1 above the OS
+// low-memory globals, exactly as videoInit expects.
+#define MEM1_BASE  0x80000000u
+#define MEM1_SIZE  0x01800000u   // 24MB
+#define OS_LOWMEM_END 0x80003100u // OS globals/BI2/dbg live below this on real HW
+
+static u8*  gMem1     = NULL;   // actual mapped base (== MEM1_BASE on success)
+static u8*  gArenaLo  = NULL;
+static u8*  gArenaHi  = NULL;
+
+static void osArenaInit(void) {
+    if (gMem1) return;
+#if defined(_WIN32)
+    // Reserve+commit exactly at the GameCube MEM1 address.
+    gMem1 = (u8*)VirtualAlloc((void*)MEM1_BASE, MEM1_SIZE,
+                              MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (!gMem1) {
+        // Fallback: let the OS pick an address. Absolute 0x8xxxxxxx reads will then
+        // fault, but relative arena use still works - surfaces the mapping failure.
+        fprintf(stderr, "[os] WARNING: could not map MEM1 at 0x%08X (err %lu); "
+                        "absolute guest addresses will fault\n",
+                        MEM1_BASE, (unsigned long)GetLastError());
+        gMem1 = (u8*)VirtualAlloc(NULL, MEM1_SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    }
+#else
+    gMem1 = (u8*)malloc(MEM1_SIZE);
+#endif
+    // Populate the OS low-memory globals the game reads.
+    if (gMem1 == (u8*)MEM1_BASE) {
+        *(u32*)(MEM1_BASE + 0x00F8) = 162000000u; // bus clock (GC: 162MHz)
+        *(u32*)(MEM1_BASE + 0x00FC) =  40500000u; // core clock / CPU (162/4-ish base)
+        *(u32*)(MEM1_BASE + 0x002C) = 0x10000006u; // console type: retail
+    }
+    // Arena starts above OS low memory, ends near the top of MEM1.
+    gArenaLo = (gMem1 == (u8*)MEM1_BASE) ? (u8*)OS_LOWMEM_END
+                                         : (u8*)(((u32)gMem1 + 0x1f) & ~0x1fu);
+    gArenaHi = gMem1 + MEM1_SIZE - 0x20000; // leave headroom at the top
+}
+
 // --- init / system ---------------------------------------------------------
-void OSInit(void) { }
+void OSInit(void) { osArenaInit(); }
 u32  OSGetConsoleType(void) { return 0x10000006u; } // retail
 void OSResetSystem(int reset, u32 resetCode, BOOL forceMenu) { (void)reset; (void)resetCode; (void)forceMenu; }
 u32  OSGetResetCode(void) { return 0; }
@@ -79,14 +127,15 @@ void OSSetProgressiveMode(u32 on) { (void)on; }
 u32  OSGetProgressiveMode(void) { return 0; }
 
 // --- arena / heap (backed by the C heap) -----------------------------------
-void* OSGetArenaHi(void) { return NULL; }
-void* OSGetArenaLo(void) { return NULL; }
-void  OSSetArenaHi(void* addr) { (void)addr; }
-void  OSSetArenaLo(void* addr) { (void)addr; }
+void* OSGetArenaHi(void) { osArenaInit(); return gArenaHi; }
+void* OSGetArenaLo(void) { osArenaInit(); return gArenaLo; }
+void  OSSetArenaHi(void* addr) { gArenaHi = (u8*)addr; }
+void  OSSetArenaLo(void* addr) { gArenaLo = (u8*)addr; }
 void* OSAllocFromArenaLo(u32 size, u32 align) { (void)align; return malloc(size); }
 void* OSAllocFromArenaHi(u32 size, u32 align) { (void)align; return malloc(size); }
 
-void*        OSInitAlloc(void* lo, void* hi, int maxHeaps) { (void)lo; (void)hi; (void)maxHeaps; return NULL; }
+volatile OSHeapHandle __OSCurrHeap = -1;
+void*        OSInitAlloc(void* lo, void* hi, int maxHeaps) { (void)hi; (void)maxHeaps; return lo; }
 OSHeapHandle OSCreateHeap(void* start, void* end) { (void)start; (void)end; return 0; }
 OSHeapHandle OSSetCurrentHeap(OSHeapHandle heap) { (void)heap; return 0; }
 void*        OSAllocFromHeap(OSHeapHandle heap, u32 size) { (void)heap; return malloc(size); }
@@ -104,7 +153,11 @@ BOOL OSJoinThread(OSThread* t, void** v) { (void)t; if (v) *v = NULL; return TRU
 s32  OSResumeThread(OSThread* t) { (void)t; return 0; }
 s32  OSSuspendThread(OSThread* t) { (void)t; return 0; }
 BOOL OSIsThreadTerminated(OSThread* t) { (void)t; return TRUE; }
-OSThread* OSGetCurrentThread(void) { return NULL; }
+OSThread* OSGetCurrentThread(void) {
+    static OSThread gMainThread; // one host "main" thread, always running
+    gMainThread.state = OS_THREAD_STATE_RUNNING;
+    return &gMainThread;
+}
 void OSSleepThread(OSThreadQueue* q) { (void)q; }
 void OSWakeupThread(OSThreadQueue* q) { (void)q; }
 void OSYieldThread(void) { }

@@ -1,0 +1,306 @@
+// game_model_support.c - support layer so the real src/main/model.c links and its
+// resource-cache init runs. model.c's ModelList/anim helpers live in modelEngine.c, which
+// CANNOT be compiled (it redefines gResourceDescriptors + Resource_Acquire already ported
+// in game_resource.c, and would pull all ~600 DLLs). So the handful model.c needs are
+// reimplemented here (allocModelStruct faithfully; ModelList_getHeader -> "not cached" so
+// loads run fresh), alongside real PS matrix/vector math + OS fastcast, and stubs for the
+// model file-loaders / render helpers not on the init path yet. Headerless (bare-symbol
+// linkage), like the other *_stubs.c, to avoid signature conflicts.
+//
+// Milestone: model.c compiled + linked + ObjModel_InitResourceCaches runs in init. Full
+// ObjModel_Load (model file load + ModelFileHeader byte-swap + relocation) is the next step.
+
+#include <stdint.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include "port/byteswap.h"
+#include "port/stfx_inflate.h"
+#include "port/dvd_shim.h"
+
+extern void* mmAlloc(int size, int type, int flag);
+extern void  loadAssetFileById(void* out, int fileId);
+extern void  bswapModelFileHeader(void* p);
+extern void  bswapModelRenderOps(void* p);
+extern double acos(double);   // avoid <math.h> so we don't hit ucrt's inline acosf
+
+// --- MODELS.tab / MODELS.bin (loaded by dir, like the model_view tool) ------
+static unsigned char* gModelsTab; static int gModelsTabSize;
+static unsigned char* gModelsBin; static int gModelsBinSize;
+
+// --- anim data pipeline (MODANIM/AMAP global, ANIM per-dir) ------------------
+// modelLoadAnimations + modelGetAmapSize read these via fileLoadToBufferOffset (dvd_shim)
+// and gModelAnimDataOffsetTable. On disc they are big-endian; register host-swapped copies
+// so the recompiled game reads them natively. MODANIM.TAB/BIN + AMAP.TAB/BIN are ROOT-level
+// (global model-id -> anim mapping); ANIM.TAB/BIN are per-area (the area's animation data).
+//   MODANIM.TAB (0x2d) u16[]: model id -> MODANIM.BIN offset
+//   MODANIM.BIN (0x2e) s16[]: per-model anim-id lists, -1 separated
+//   AMAP.TAB   (0x31) u32[]: model id -> AMAP.BIN offset (size = next-this within a group)
+//   AMAP.BIN   (0x32) u8[]:  per-anim bone maps (byte data, no swap)
+//   ANIM.TAB   (0x2f) u32[]: anim id -> ANIM.BIN offset (0x10000000 = slot flag)
+//   ANIM.BIN   (0x30) raw anim records (NOT ZLB; size via consecutive ANIM.TAB deltas)
+static unsigned char* gAnimTab; static int gAnimTabSize;   // per-dir ANIM.TAB, u32-swapped
+static unsigned char* gAnimBin; static int gAnimBinSize;   // per-dir ANIM.BIN, raw
+static int gAnimRegistered;
+
+// model.c global: anim id -> ANIM.BIN offset. Normally set by ObjModel_InitResourceCaches,
+// but that returns early in the port (its getCurrentDataFile(MODELS_TAB_A) is null since we
+// load MODELS.tab per-dir), so set it here when the swapped ANIM.TAB is ready.
+extern unsigned* gModelAnimDataOffsetTable;
+
+static void animFilesEnsureLoaded(const char* dir) {
+    if (gAnimRegistered) return;
+    gAnimRegistered = 1;
+    int sz; unsigned char* b; char p[128];
+    // root-level, host-swapped, handed to dvd_shim so fileLoadToBufferOffset serves slices
+    if ((b = (unsigned char*)loadFileByPath("MODANIM.TAB", &sz, 0))) { beFixArray16(b, sz/2); dvd_register_buffer(0x2d, b, sz); }
+    if ((b = (unsigned char*)loadFileByPath("MODANIM.BIN", &sz, 0))) { beFixArray16(b, sz/2); dvd_register_buffer(0x2e, b, sz); }
+    if ((b = (unsigned char*)loadFileByPath("AMAP.TAB",    &sz, 0))) { beFixArray32(b, sz/4); dvd_register_buffer(0x31, b, sz); }
+    if ((b = (unsigned char*)loadFileByPath("AMAP.BIN",    &sz, 0))) {                        dvd_register_buffer(0x32, b, sz); }
+    // per-area
+    snprintf(p, sizeof p, "%s/ANIM.TAB", dir);
+    if ((gAnimTab = (unsigned char*)loadFileByPath(p, &gAnimTabSize, 0))) {
+        beFixArray32(gAnimTab, gAnimTabSize/4);
+        dvd_register_buffer(0x2f, gAnimTab, gAnimTabSize);
+        gModelAnimDataOffsetTable = (unsigned*)gAnimTab;
+    }
+    snprintf(p, sizeof p, "%s/ANIM.BIN", dir);
+    gAnimBin = (unsigned char*)loadFileByPath(p, &gAnimBinSize, 0);
+}
+
+static void modelsEnsureLoaded(void) {
+    if (gModelsTab && gModelsBin) return;
+    const char* dir = getenv("STAIRFAX_MODEL_DIR"); if (!dir) dir = "desert";
+    char p[128];
+    snprintf(p, sizeof p, "%s/MODELS.tab", dir); gModelsTab = (unsigned char*)loadFileByPath(p, &gModelsTabSize, 0);
+    snprintf(p, sizeof p, "%s/MODELS.bin", dir); gModelsBin = (unsigned char*)loadFileByPath(p, &gModelsBinSize, 0);
+    animFilesEnsureLoaded(dir);
+}
+// Find the "ZLB" block within maxScan bytes (models have a small metadata prefix).
+static int findZLB(const unsigned char* p, int maxScan) {
+    for (int i = 0; i + 4 <= maxScan; ++i)
+        if (p[i]=='Z' && p[i+1]=='L' && p[i+2]=='B') return i;
+    return -1;
+}
+
+// --- real matrix/vector math (Mtx = f32[3][4] row-major, Vec = f32[3]) ------
+void  PSVECAdd(const float* a, const float* b, float* o) { o[0]=a[0]+b[0]; o[1]=a[1]+b[1]; o[2]=a[2]+b[2]; }
+void  PSVECSubtract(const float* a, const float* b, float* o) { o[0]=a[0]-b[0]; o[1]=a[1]-b[1]; o[2]=a[2]-b[2]; }
+float PSVECDotProduct(const float* a, const float* b) { return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
+void  PSMTXCopy(const float* s, float* d) { for (int i=0;i<12;++i) d[i]=s[i]; }
+void  PSMTXTrans(float* m, float x, float y, float z) {
+    memset(m,0,12*sizeof(float)); m[0]=m[5]=m[10]=1.0f; m[3]=x; m[7]=y; m[11]=z;
+}
+void  PSMTXTranspose(const float* s, float* d) {   // 3x3 transpose, translation cleared
+    d[0]=s[0]; d[1]=s[4]; d[2]=s[8];  d[3]=0.0f;
+    d[4]=s[1]; d[5]=s[5]; d[6]=s[9];  d[7]=0.0f;
+    d[8]=s[2]; d[9]=s[6]; d[10]=s[10];d[11]=0.0f;
+}
+void  PSMTXReorder(const float* s, float* d) { PSMTXCopy(s,d); }  // approx; used off the load path
+
+// --- OS fast casts (shadow OSFastCast.h declares these extern) --------------
+int16_t __OSf32tos16(float f)        { return (int16_t)f; }
+int8_t  __OSf32tos8(float f)         { return (int8_t)f; }
+float   __OSs16tof32(const int16_t* p){ return (float)*p; }
+float   __OSs8tof32(const int8_t* p)  { return (float)*p; }
+float   __OSu8tof32(const uint8_t* p) { return (float)*p; }
+
+// --- modelEngine ModelList (reimplemented; layout from main/model_engine.h) --
+typedef struct { int16_t* entries; int16_t* end; int16_t* capacityEnd;
+                 uint8_t dataSize; uint8_t strideShorts; uint8_t pad[2]; int16_t* iter; } ML;
+void* allocModelStruct(int capacity, int dataSize) {
+    int entryBytes = dataSize + 2;
+    ML* list = (ML*)mmAlloc(capacity*entryBytes + (int)sizeof(ML), 0x1a, 0);
+    list->entries = (int16_t*)((uint8_t*)list + sizeof(ML));
+    list->dataSize = (uint8_t)dataSize;
+    list->strideShorts = (uint8_t)((unsigned)entryBytes >> 1);
+    list->end = list->entries;
+    list->capacityEnd = list->entries + capacity * list->strideShorts;
+    memset(list->entries, -1, (size_t)capacity * (list->strideShorts * 2));
+    return list;
+}
+int  ModelList_getHeader(void* list, int index, void* outHeader) { (void)list;(void)index;(void)outHeader; return 0; }
+void modelInitModelList(void) { }
+int  model_adjustModelList(void) { return 0; }
+int  model_findIdxInModelList(void) { return 0; }
+
+// --- data-file loaders (getCurrentDataFile bridges to the MLDF asset loader) --
+void* getCurrentDataFile(int id) {
+    if (id == 0x2f) { modelsEnsureLoaded(); return gAnimTab; }  // ANIM.TAB (per-dir, host-swapped)
+    void* p = 0; loadAssetFileById(&p, id); return p;
+}
+void* textureIdxToPtr(void) { return 0; }
+void* textureLoad(void) { return 0; }
+
+// Size of anim id `idx` in ANIM.BIN = delta of consecutive (host-order) ANIM.TAB offsets.
+static unsigned animEntrySize(int idx) {
+    if (!gAnimTab || idx < 0 || (idx + 2) * 4 > gAnimTabSize) return 0x1000;
+    unsigned a = ((unsigned*)gAnimTab)[idx]     & 0x0fffffff;
+    unsigned b = ((unsigned*)gAnimTab)[idx + 1] & 0x0fffffff;
+    return (b > a && b - a < 0x40000) ? (b - a) : 0x1000;
+}
+
+// Scan MODELS.tab for non-zero entries (real models), logging the first `want`.
+int stairfax_model_scan(int want) {
+    modelsEnsureLoaded();
+    if (!gModelsTab) { fprintf(stderr, "[model] no MODELS.tab\n"); return -1; }
+    int n = gModelsTabSize / 4, found = 0, first = -1, firstStatic = -1;
+    for (int i = 0; i < n; ++i) {
+        unsigned e = beRead32(gModelsTab + i * 4);
+        if (e & 0x0fffffff) {
+            unsigned off = e & 0x0fffffff;
+            int animCount = (gModelsBin && off + 0x24 <= (unsigned)gModelsBinSize) ? (int)beRead32(gModelsBin + off + 0x1c) : -1;
+            if (first < 0) first = i;
+            if (animCount == 0 && firstStatic < 0) firstStatic = i;
+            if (found < want) fprintf(stderr, "[model] tab[%d]=0x%08x animCount=%d\n", i, e, animCount);
+            found++;
+        }
+    }
+    fprintf(stderr, "[model] first real=%d, first STATIC (animCount 0)=%d\n", first, firstStatic);
+    if (firstStatic >= 0) return firstStatic;
+    fprintf(stderr, "[model] MODELS.tab: %d entries, %d non-zero, first=%d\n", n, found, first);
+    return first;
+}
+
+// getTableFileEntry(MODELS_TAB_A, index) -> the model's MODELS.bin entry word (BE).
+int getTableFileEntry(int fileId, int index, int* out) {
+    if (fileId != 0x2a) { if (out) *out = 0; return 0; }
+    modelsEnsureLoaded();
+    if (!gModelsTab || index < 0 || (index + 1) * 4 > gModelsTabSize) return 0;
+    unsigned entry = beRead32(gModelsTab + index * 4);
+    if (!(entry & 0x0fffffff)) return 0;   // missing model
+    if (out) *out = (int)entry;
+    if (getenv("STAIRFAX_MODEL_TEST"))
+        fprintf(stderr, "[model] tab[%d]=0x%08x (off=0x%x) tabSize=0x%x binSize=0x%x\n",
+                index, out ? *out : 0, out ? (*out & 0x0fffffff) : 0, gModelsTabSize, gModelsBinSize);
+    return 1;
+}
+
+// loadModelsBin reads the model entry's size metadata (BE) from MODELS.bin[offset].
+void loadModelsBin(int offsetFlags, int* pAnimCount, int* pHeaderSize, int* pAmapFlag, int* pDataLen, int id) {
+    (void)id;
+    modelsEnsureLoaded();
+    unsigned off = (unsigned)offsetFlags & 0x0fffffff;
+    if (!gModelsBin || off + 0x24 > (unsigned)gModelsBinSize) {
+        *pAnimCount = *pHeaderSize = *pAmapFlag = *pDataLen = 0; return;
+    }
+    const unsigned char* e = gModelsBin + off;
+    *pDataLen    = (int)beRead32(e + 0x04);
+    *pAmapFlag   = (int)beRead32(e + 0x18);
+    *pAnimCount  = (int)beRead32(e + 0x1c);
+    *pHeaderSize = (int)beRead32(e + 0x20);
+}
+
+// loadAndDecompressDataFile: fileId-aware.
+//   MODELS.bin (0x2b/0x46): inflate the model's ZLB block into dst, then swap the header.
+//   ANIM.bin   (0x30/0x4a): raw anim records (NOT ZLB). flags&1 = size probe (return the
+//     entry size via *sizeOut, no copy); else copy `length` bytes into dst. The anim record
+//     content stays big-endian for now (playback byte-swap is the next step); the load path
+//     only needs a correctly-sized, non-crashing buffer.
+void* loadAndDecompressDataFile(int fileId, void* dst, int offsetFlags, unsigned length, int* sizeOut, int idx, unsigned flags) {
+    modelsEnsureLoaded();
+    unsigned off = (unsigned)offsetFlags & 0x0fffffff;
+
+    if (fileId == 0x30 || fileId == 0x4a) {           // ANIM.BIN (per-area, raw)
+        if (flags & 1) { if (sizeOut) *sizeOut = (int)animEntrySize(idx); return dst; }
+        if (!gAnimBin || !dst) return dst;
+        unsigned n = length;
+        if (off >= (unsigned)gAnimBinSize) return dst;
+        if (off + n > (unsigned)gAnimBinSize) n = (unsigned)gAnimBinSize - off;
+        memcpy(dst, gAnimBin + off, n);
+        return dst;
+    }
+
+    // MODELS.bin (default): FACEFEED metadata prefix + ZLB block.
+    if (!gModelsBin || !dst || off >= (unsigned)gModelsBinSize) return dst;
+    if (getenv("STAIRFAX_MODEL_TEST")) {
+        const unsigned char* d = gModelsBin + off;
+        fprintf(stderr, "[model] rec@0x%x:", off);
+        for (int i = 0; i < 0x40 && off + i < (unsigned)gModelsBinSize; ++i) fprintf(stderr, " %02x", d[i]);
+        fprintf(stderr, "\n");
+    }
+    int z = findZLB(gModelsBin + off, 0x40);
+    if (z < 0) { if (getenv("STAIRFAX_MODEL_TEST")) fprintf(stderr, "[model] no ZLB at 0x%x\n", off); return dst; }
+    if (getenv("STAIRFAX_MODEL_TEST")) fprintf(stderr, "[model] ZLB at +0x%x, usize=0x%x csize=0x%x\n",
+        z, beRead32(gModelsBin+off+z+8), beRead32(gModelsBin+off+z+0xc));
+    const unsigned char* zlb = gModelsBin + off + z;
+    unsigned csize = beRead32(zlb + 0xc);
+    size_t got = 0;
+    if (stfx_inflate_zlib((unsigned char*)dst, length ? length : 0x200000, zlb + 0x10, csize, &got) != 0) {
+        if (getenv("STAIRFAX_MODEL_TEST")) fprintf(stderr, "[model] inflate failed (csize=0x%x)\n", csize);
+        return dst;
+    }
+    bswapModelFileHeader(dst);   // BE -> host so RelocateModelData reads valid offsets
+    bswapModelRenderOps(dst);    // + renderOps/textureIds leaf so ResolveRenderOpTextures is safe
+    return dst;
+}
+
+// Load a model's renderable header only, exactly as ObjModel_Load does up to (but not
+// including) modelLoadAnimations - which needs the MODANIM/AMAP/ANIM data subsystem that
+// isn't up yet and faults on animated models. This yields a fully relocated header with
+// render-op textures resolved (bind pose), enough to render skinned models statically.
+extern void* ObjModel_LoadModelData(int id);
+extern void  ObjModel_RelocateModelData(unsigned char* m);
+extern void  ObjModel_ResolveRenderOpTextures(unsigned char* m);
+void* stairfax_model_load_static(int id) {
+    int realId = id < 0 ? -id : id;
+    unsigned char* h = (unsigned char*)ObjModel_LoadModelData(realId);
+    if (!h) return 0;
+    ObjModel_RelocateModelData(h);
+    int off = 0;
+    for (int i = 0; i < h[0xf2]; i++) {           // textureLoad is stubbed -> null slots
+        int base = *(int*)(h + 0x20);
+        *(void**)(base + off) = 0;
+        off += 4;
+    }
+    ObjModel_ResolveRenderOpTextures(h);
+    return h;
+}
+
+// Byte-swap a model's animation move data (BE-on-disc -> host). The model header IS the
+// ObjAnimDef (ObjModel.file/animDef union): moveCount@0xEC, moveData@0x64 = a union with
+// animationModelPtrs, an array of moveCount pointers to the loaded ANIM.BIN atlas entries.
+// Each entry is a self-contained ObjAnimMoveData/ObjAnimFrameCommand blob, still big-endian:
+//   [0]=refcount [1]=frameControl [2..3]=streamOff(s16) [4..5]=rootCurveOffset(s16)
+//   [6]=jointCount [7]=frameLength [8]=frameStride [9]=? [10..streamOff)=u16 descriptors
+//   [streamOff..)=packed per-frame delta stream (a big-endian bitstream - left BE; the
+//   reimplemented decoder reads it MSB-first). RelocateModelData already relocated the
+//   pointers; only these multi-byte scalar/array fields need swapping so Object_ObjAnimSetMove
+//   + modelAnimUpdateChannels read them natively. Idempotency: dedups aliased entries; call once.
+void stairfax_bswap_model_moves(void* header) {
+    unsigned char* h = (unsigned char*)header;
+    int moveCount = *(unsigned short*)(h + 0xEC);
+    unsigned char** moveData = *(unsigned char***)(h + 0x64);
+    if (!moveData || moveCount <= 0 || moveCount > 256) return;
+    unsigned char* seen[256]; int ns = 0;
+    for (int i = 0; i < moveCount; ++i) {
+        unsigned char* a = moveData[i];
+        if (!a) continue;
+        int dup = 0; for (int k = 0; k < ns; ++k) if (seen[k] == a) { dup = 1; break; }
+        if (dup) continue;
+        if (ns < 256) seen[ns++] = a;
+        unsigned streamOff = beRead16(a + 2);   // read BE before swapping in place
+        beFix16(a + 2);                          // streamOff (s16)
+        beFix16(a + 4);                          // rootCurveOffset (s16)
+        if (streamOff > 10 && streamOff < 0x8000)
+            beFixArray16(a + 10, (streamOff - 10) / 2);  // frame-command descriptors (u16)
+    }
+}
+
+// --- anim / render helpers (not on the init path yet) -----------------------
+void* animationLoad(void) { return 0; }
+// modelAnimBuildJointMatrices is now the reversed real implementation in game_scene.cpp.
+void  modelRenderInterpolateRootTransform(void) { }
+void  modelRenderDecodeAdpcm(void) { }
+void  modelRenderInstrsState_init(void) { }
+void  ShaderDef_free(void) { }
+void  shaderInit(void) { }
+void  objFrozenRenderCb(void) { }
+
+// --- misc ------------------------------------------------------------------
+void     GXSetAlphaCompare(void) { }
+unsigned PPCMfhid2(void) { return 0; }
+float    acosf(float x) { return (float)acos((double)x); }  // shadow math_api declares extern
+
+// --- data globals ----------------------------------------------------------
+float gModelRootRotX, gModelRootRotY, gModelRootRotZ, gModelVertexScale;

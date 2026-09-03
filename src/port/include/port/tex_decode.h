@@ -11,7 +11,9 @@
 extern "C" {
 #endif
 
-// GX texture format ids (subset; values match dolphin/gx GXTexFmt).
+// GX texture format ids (subset; values match dolphin/gx GXTexFmt). Guard so this
+// coexists with dolphin/gx/GXEnum.h when both are included (e.g. in map_view).
+#ifndef GX_TF_I4
 enum {
     GX_TF_I4     = 0,
     GX_TF_I8     = 1,
@@ -22,6 +24,7 @@ enum {
     GX_TF_RGBA8  = 6,
     GX_TF_CMPR   = 14,
 };
+#endif
 
 // Decode a GX texture to linear, row-major RGBA8 (w*h*4 bytes). Returns a malloc'd
 // buffer the caller frees, or NULL if the format is not yet supported.

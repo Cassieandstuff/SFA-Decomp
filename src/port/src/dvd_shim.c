@@ -225,7 +225,16 @@ const char* dvd_shim_fileName(int idx, int* outSize) {
 }
 
 // --- DVD API ---------------------------------------------------------------
-void DVDInit(void) {}
+void DVDInit(void) {
+    // The real game calls DVDInit() with no path; the "disc" is the ISO configured via
+    // STAIRFAX_ISO (so the game's own boot path mounts it without extra wiring). A tool
+    // that already called dvd_shim_init() explicitly leaves gIso mounted and this is a
+    // no-op.
+    if (gIso.count == 0) {
+        const char* iso = getenv("STAIRFAX_ISO");
+        if (iso && *iso) dvd_shim_init(iso);
+    }
+}
 void DVDSetAutoInvalidation(int32_t enable) { gAutoInvalidate = enable; }
 int32_t DVDGetDriveStatus(void) { return 0; }
 int32_t DVDGetCommandBlockStatus(DVDCommandBlock* block) { (void)block; return 0; }
@@ -326,19 +335,34 @@ int fileLoadToBuffer(int id, void* buffer) {
     return r < 0 ? 0 : len;
 }
 
+// Register an already-loaded file buffer under an id so fileLoad*/fileLoadToBufferOffset
+// can serve slices of it (used to hand dvd the MLDF buffers game_assetfile loaded).
+void dvd_register_buffer(int id, void* buf, int size) {
+    if (id < 0 || id >= DVD_MAX_FILE_ID) return;
+    gCache[id] = buf; gCacheSize[id] = size;
+}
+
+// Optional per-id post-load fixups (e.g. byte-swap an OBJECTS.bin ObjDef so the
+// recompiled loadObjectFile reads it in host order). Weak-ish: only for known ids.
+extern void bswapObjDef(void* p);
+#define MLDF_FILEID_OBJECTS_BIN 0x3e
+
 int fileLoadToBufferOffset(int id, void* dst, int offset, int size) {
     if (size == 0 || id < 0 || id >= DVD_MAX_FILE_ID || !dst) return 0;
+    int got = 0;
     if (gCache[id]) {
         if (offset + size > gCacheSize[id]) return 0;
         memcpy(dst, (char*)gCache[id] + offset, (size_t)size);
-        return size;
+        got = size;
+    } else if (gNameTable[id]) {
+        DVDFileInfo info;
+        if (!DVDOpen(gNameTable[id], &info)) return 0;
+        int32_t r = DVDRead(&info, dst, size, offset);
+        DVDClose(&info);
+        got = r < 0 ? 0 : size;
     }
-    if (!gNameTable[id]) return 0;
-    DVDFileInfo info;
-    if (!DVDOpen(gNameTable[id], &info)) return 0;
-    int32_t r = DVDRead(&info, dst, size, offset);
-    DVDClose(&info);
-    return r < 0 ? 0 : size;
+    if (got && id == MLDF_FILEID_OBJECTS_BIN) bswapObjDef(dst);  // BE ObjDef -> host order
+    return got;
 }
 
 int32_t fileGetSize(int id) {

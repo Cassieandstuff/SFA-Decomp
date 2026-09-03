@@ -31,6 +31,12 @@ if(WIN32)
     add_compile_definitions(UNICODE _UNICODE NOMINMAX)
 endif()
 
+# Make MSVC report a correct __cplusplus so headers guarded on it (e.g. the repo's
+# types.h nullptr shim, which must stay out of real C++ TUs) behave as written.
+if(MSVC)
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
+endif()
+
 # --- Host platform layer (window/input glue) -------------------------------
 add_library(stairfax_platform STATIC src/platform/plat_window_win32.c)
 target_include_directories(stairfax_platform PUBLIC ${RHI_INCLUDE})
@@ -87,6 +93,13 @@ target_link_libraries(stairfax_gx PUBLIC rhi_common)
 add_library(stairfax_dvd STATIC src/dvd_shim.c src/stfx_inflate.c)
 target_include_directories(stairfax_dvd PUBLIC ${RHI_INCLUDE})
 
+# --- Asset readers (on-disc format layer: ZLB/DIR, textures, map blocks) -----
+# Shared by the viewer tools; keeps format knowledge in one place. tex_decode.c
+# provides gxTexDecode (GX texel -> RGBA8); stairfax_dvd provides inflate + file IO.
+add_library(stairfax_assets STATIC src/assets.c src/tex_decode.c)
+target_include_directories(stairfax_assets PUBLIC ${RHI_INCLUDE})
+target_link_libraries(stairfax_assets PUBLIC stairfax_dvd)
+
 # Include layout + defines for compiling GAME code (and shims that shadow dolphin
 # headers). Order is deliberate:
 #   1. src/port/include  - host shadows (dolphin/os.h etc.) win first
@@ -108,10 +121,19 @@ set(GAME_INCLUDES
 )
 set(GAME_DEFS TARGET_PC=1 STAIRFAX_PORT=1 _CRT_SECURE_NO_WARNINGS=1)
 
-# --- OS + mm shims (Dolphin OS API + game memory manager) ------------------
-add_library(stairfax_os STATIC src/os_shim.c src/mm_shim.c)
+# --- OS shim (Dolphin OS API) ----------------------------------------------
+add_library(stairfax_os STATIC src/os_shim.c)
 target_include_directories(stairfax_os PUBLIC ${GAME_INCLUDES})
 target_compile_definitions(stairfax_os PUBLIC ${GAME_DEFS})
+
+# --- mm shim (malloc-backed memory manager) --------------------------------
+# The real src/main/mm.c can't be compiled on host (it aliases named .bss globals as
+# one MmGlobalLayout via (MmGlobalLayout*)gMmStoreArray - a GC link-order overlay, like
+# pad.c). This shim reimplements mm's observable contract, including faithful
+# deferred-free timing. Its own lib so a future clean mm reimpl can drop in.
+add_library(stairfax_mm STATIC src/mm_shim.c)
+target_include_directories(stairfax_mm PUBLIC ${GAME_INCLUDES})
+target_compile_definitions(stairfax_mm PUBLIC ${GAME_DEFS})
 
 # --- First real game TU compiled on host (milestone / regression guard) -----
 # OBJECT library: compiles objanim.c through the shadow headers. Not linked into an
@@ -140,7 +162,7 @@ target_link_libraries(disc_ls PRIVATE stairfax_dvd)
 add_executable(os_mm_smoketest src/tools/os_mm_smoketest.c)
 target_include_directories(os_mm_smoketest PRIVATE ${GAME_INCLUDES})
 target_compile_definitions(os_mm_smoketest PRIVATE ${GAME_DEFS})
-target_link_libraries(os_mm_smoketest PRIVATE stairfax_os)
+target_link_libraries(os_mm_smoketest PRIVATE stairfax_os stairfax_mm)
 
 add_executable(gx_smoketest src/tools/gx_smoketest.c)
 target_include_directories(gx_smoketest PRIVATE ${RHI_INCLUDE})
@@ -157,6 +179,119 @@ target_link_libraries(tex_view PRIVATE stairfax_gx stairfax_dvd stairfax_platfor
 add_executable(model_view src/tools/model_view.c)
 target_include_directories(model_view PRIVATE ${RHI_INCLUDE})
 target_link_libraries(model_view PRIVATE stairfax_gx stairfax_dvd stairfax_platform)
+
+# --- GX draw path (real GX vertex API + write-gather pipe -> RHI) -----------
+# The game submits geometry by writing to GXWGFifo; this library implements the
+# real GX signatures + a FIFO interpreter. gx_wgpipe.cpp is C++ so the PPCWGPipe
+# write-proxy overloads are in effect (see the ppcwgpipe_struct.h host shadow).
+add_library(stairfax_gxdraw STATIC src/gx_draw.c src/gx_wgpipe.cpp)
+target_include_directories(stairfax_gxdraw PUBLIC ${GAME_INCLUDES})
+target_compile_definitions(stairfax_gxdraw PUBLIC ${GAME_DEFS})
+target_link_libraries(stairfax_gxdraw PUBLIC rhi_common)
+
+# Real map geometry from the ISO -> MapBlockData -> gx_draw.
+add_executable(map_view src/tools/map_view.cpp)
+target_include_directories(map_view PRIVATE ${GAME_INCLUDES})
+target_compile_definitions(map_view PRIVATE ${GAME_DEFS})
+target_link_libraries(map_view PRIVATE stairfax_gxdraw stairfax_assets rhi_common stairfax_platform)
+
+add_executable(gx_draw_smoketest src/tools/gx_draw_smoketest.cpp)
+target_include_directories(gx_draw_smoketest PRIVATE ${GAME_INCLUDES})
+target_compile_definitions(gx_draw_smoketest PRIVATE ${GAME_DEFS})
+target_link_libraries(gx_draw_smoketest PRIVATE stairfax_gxdraw rhi_common stairfax_platform)
+
+# --- Real game drawing TU: lightmap_draw.c rendering through gx_draw --------
+# lightmap_draw.c is compiled as C++ so its GXWGFifo.* stores hit the write-proxy.
+# /Gy + /OPT:REF let the linker drop the file's heavy unreferenced functions
+# (sceneDraw, objRender, ...) so only lightmapDrawTriangleList + its deps link.
+add_executable(lightmap_smoketest
+    src/tools/lightmap_smoketest.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/main/lightmap_draw.c)
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/../../src/main/lightmap_draw.c
+    PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "/TP;/Gy;/FImain/dll/ppcwgpipe_struct.h")
+target_include_directories(lightmap_smoketest PRIVATE ${GAME_INCLUDES})
+target_compile_definitions(lightmap_smoketest PRIVATE ${GAME_DEFS})
+target_link_libraries(lightmap_smoketest PRIVATE stairfax_gxdraw rhi_common stairfax_platform)
+if(MSVC)
+    # We call ONLY lightmapDrawTriangleList out of lightmap_draw.c. The file's other
+    # functions (sceneDraw, objRender, mapBlockRender*, ...) pull in the whole game
+    # and are never invoked here, so leave their externs unresolved rather than stub
+    # the entire scene graph. Safe because those code paths never execute in this test.
+    target_link_options(lightmap_smoketest PRIVATE /FORCE:UNRESOLVED /OPT:NOREF)
+endif()
+
+# --- Boot the real engine: gameloop_main.c (main/init/gameLoop) --------------
+# Phase 3. Compiles the game's real entry TU + video-init TU against the HAL. Links
+# incrementally: each pass resolves more of init()/gameLoop()'s call surface by adding
+# a real game TU or a host stub. Far from linking yet - built on demand to enumerate
+# and whittle down the unresolved-symbol surface.
+add_executable(game_engine EXCLUDE_FROM_ALL
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/main/gameloop_main.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/main/pi_videoinit.c
+    src/game_boot_shims.c
+    src/game_boot_gx.c
+    src/game_boot_externs.c
+    src/game_boot_stubs.c
+    src/pad_input.c
+    src/game_scene.cpp
+    src/game_resource.c
+    src/game_savestate.c
+    src/game_assetfile.c
+    src/game_object_stubs.c
+    src/game_romlist.c
+    src/game_model_support.c
+    src/game_model_swap.c
+    src/game_objdef_swap.c
+    src/game_sky.c
+    src/game_sky_stubs.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/main/object.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/main/model.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/main/objanim.c
+    src/game_objanim_stubs.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/engine/5/5.c
+    src/game_engine_stubs.cpp)
+target_include_directories(game_engine PRIVATE ${GAME_INCLUDES})
+target_compile_definitions(game_engine PRIVATE ${GAME_DEFS})
+# mm: the real src/main/mm.c casts (MmGlobalLayout*)gMmStoreArray, reading regions at
+# +0x3F00 past a 0x80-byte global - a GC .bss-adjacency overlay (like pad.c) that is not
+# host-safe and can't be fixed byte-neutrally. So game_engine uses the faithful mm shim.
+target_link_libraries(game_engine PRIVATE stairfax_os stairfax_mm stairfax_vi stairfax_dvd stairfax_assets stairfax_gxdraw rhi_common stairfax_platform)
+if(MSVC)
+    target_link_options(game_engine PRIVATE /LARGEADDRESSAWARE /MAP)
+endif()
+
+# --- Host input state-machine smoketest (no hardware needed) -----------------
+add_executable(pad_smoketest EXCLUDE_FROM_ALL
+    src/tools/pad_smoketest.c
+    src/pad_input.c)
+
+# --- Resource/DLL registry smoketest -----------------------------------------
+add_executable(resource_smoketest EXCLUDE_FROM_ALL
+    src/tools/resource_smoketest.c
+    src/game_resource.c)
+
+# --- Endianness facility smoketest (port/byteswap.h) -------------------------
+add_executable(byteswap_smoketest EXCLUDE_FROM_ALL
+    src/tools/byteswap_smoketest.c)
+target_include_directories(byteswap_smoketest PRIVATE ${GAME_INCLUDES})
+
+# --- Boot real game code (pi_videoinit.c) against the HAL --------------------
+add_executable(game_boot
+    src/tools/game_boot.c
+    src/game_boot_shims.c
+    src/game_boot_gx.c
+    src/game_boot_externs.c
+    src/game_boot_stubs.c
+    src/game_boot_draw.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/main/pi_videoinit.c)
+target_include_directories(game_boot PRIVATE ${GAME_INCLUDES})
+target_compile_definitions(game_boot PRIVATE ${GAME_DEFS})
+target_link_libraries(game_boot PRIVATE stairfax_os stairfax_mm stairfax_vi stairfax_dvd stairfax_gxdraw rhi_common stairfax_platform)
+# The game maps MEM1 at its real address 0x80000000; a 32-bit process needs
+# /LARGEADDRESSAWARE to own that part of the address space on 64-bit Windows.
+if(MSVC)
+    target_link_options(game_boot PRIVATE /LARGEADDRESSAWARE)
+endif()
 
 if(MSVC)
     target_compile_options(rhi_d3d11 PRIVATE /W3)

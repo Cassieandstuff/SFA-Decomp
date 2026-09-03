@@ -98,6 +98,7 @@ void* OSAllocFromArenaHi(u32 size, u32 align);
 // --- heap ------------------------------------------------------------------
 typedef int OSHeapHandle;
 void*        OSInitAlloc(void* arenaLo, void* arenaHi, int maxHeaps);
+extern volatile OSHeapHandle __OSCurrHeap;
 OSHeapHandle OSCreateHeap(void* start, void* end);
 OSHeapHandle OSSetCurrentHeap(OSHeapHandle heap);
 void*        OSAllocFromHeap(OSHeapHandle heap, u32 size);
@@ -106,8 +107,19 @@ void         OSFreeToHeap(OSHeapHandle heap, void* ptr);
 #define      OSAlloc(size)     OSAllocFromHeap(-1, (size))
 #define      OSFree(ptr)       OSFreeToHeap(-1, (ptr))
 
-// --- thread (opaque; stubbed single-thread scheduler) ----------------------
-typedef struct OSThread { u8 opaque[0x340]; } OSThread;
+// --- thread (fields mirror the real OSThread offsets game code reads) -------
+enum { OS_THREAD_STATE_READY = 1, OS_THREAD_STATE_RUNNING = 2,
+       OS_THREAD_STATE_WAITING = 4, OS_THREAD_STATE_MORIBUND = 8 };
+typedef struct OSThread {
+    u8    context[0x2C8];
+    u16   state;    /* 0x2C8 */
+    u16   attr;     /* 0x2CA */
+    s32   suspend;  /* 0x2CC */
+    s32   priority; /* 0x2D0 */
+    s32   base;     /* 0x2D4 */
+    void* val;      /* 0x2D8 */
+    u8    tail[0x40];
+} OSThread;
 typedef struct OSThreadQueue { OSThread* head; OSThread* tail; } OSThreadQueue;
 typedef s32 OSPriority;
 void OSInitThreadQueue(OSThreadQueue* queue);

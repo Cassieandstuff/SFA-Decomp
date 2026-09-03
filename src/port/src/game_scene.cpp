@@ -1,0 +1,815 @@
+// game_scene.cpp - interim port-side sceneRender for the live engine loop.
+//
+// The real src/main/lightmap.c sceneRender() drives camera/lights/visible-geometry
+// then sceneDraw(), which walks REAL loaded map+object data through renderSceneGeometry
+// -> mapBlockRenderMain (the matched interpreter in lightmap_draw.c/tex_dolphin.c/...).
+// That whole path is gated on the resource/DLL system + romlist loading real map data
+// into memory, which is still stubbed. Until those subsystems come online, this stands
+// in for sceneRender: it loads a real map straight from the ISO via stairfax_assets and
+// draws it through the SAME gx_draw -> RHI path map_view proved, with a free-fly camera
+// driven by the now-real host input (pad_input.c). It is deliberately NOT decomp-native;
+// it will be replaced by the real sceneDraw one subsystem at a time.
+//
+// Present model: the real waitNextFrame() cannot present in our HAL (it sleeps on the
+// video flip queue, which needs the retrace interrupt + video thread we don't have yet),
+// so nothing downstream flips the frame. Everything gameLoop draws AFTER sceneRender
+// (screens/UI/minimap/subtitles) is currently stubbed to no-ops, so the frame's visible
+// content is complete when sceneRender returns - we present here via VIWaitForRetrace().
+// When those subsystems become real, the present moves to a proper retrace model.
+
+#include "port/gx_draw.h"
+#include "port/renderer/rhi.h"
+#include "port/vi_shim.h"
+#include "port/dvd_shim.h"
+#include "port/assets.h"
+#include "port/plat_window.h"
+
+#include "dolphin/gx/GXGeometry.h"
+#include "dolphin/gx/GXTransform.h"
+#include "dolphin/gx/GXEnum.h"
+
+#include <cstdio>
+#include <cstring>
+#include <cstdlib>
+#include <cstdint>
+#include <cmath>
+#include <vector>
+
+extern "C" {
+    uint8_t* gxTexDecode(int fmt, int w, int h, const uint8_t* src);
+    void VIWaitForRetrace(void);
+    void stairfax_gamebit_selftest(void);
+    void  stairfax_sky_init(void);
+    float stairfax_sky_tick(void);
+    void  vi_set_clear_color(float r, float g, float b);
+    // spawned object system (object.c)
+    void** gObjList; int gObjCount;
+    void* Obj_GetActiveModel(void* obj);
+    // host input (pad_input.c)
+    int padGetStickX(int); int padGetStickY(int);
+    int padGetCX(int);     int padGetCY(int);
+    unsigned char padGetLTrigger(int); unsigned char padGetRTrigger(int);
+    unsigned int getButtonsHeld(int);
+}
+
+#define MAP_BLOCK_WORLD_SIZE 640.0f
+
+namespace {
+
+struct Block { AssetMapBlock mb; std::vector<RhiTexture*> texCache; };
+struct Placement { int block; float wx, wy, wz; };
+
+RhiInstance* gRhi = nullptr;
+std::vector<Block> gBlocks;
+std::vector<Placement> gPlaces;
+bool gInited = false;
+bool gInitFailed = false;
+
+// world bbox + a scale for camera speed
+float gWorldCtr[3] = {0,0,0};
+float gWorldR = 1000.0f;
+
+// free-fly camera
+float gCamPos[3];
+float gCamYaw = 0.0f;
+float gCamPitch = 0.35f;
+bool  gCamPlaced = false;
+
+void setupVtxFormats() {
+    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS,  GX_POS_XYZ,  GX_S16,   0);
+    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
+    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST,   GX_S16,   7);
+    GXSetVtxAttrFmt(GX_VTXFMT1, GX_VA_POS,  GX_POS_XYZ,  GX_S16,   2);
+    GXSetVtxAttrFmt(GX_VTXFMT1, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
+    GXSetVtxAttrFmt(GX_VTXFMT1, GX_VA_TEX0, GX_TEX_ST,   GX_F32,   0);
+    GXSetVtxAttrFmt(GX_VTXFMT2, GX_VA_POS,  GX_POS_XYZ,  GX_F32,   0);
+    GXSetVtxAttrFmt(GX_VTXFMT2, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
+    GXSetVtxAttrFmt(GX_VTXFMT2, GX_VA_TEX0, GX_TEX_ST,   GX_F32,   0);
+    GXSetVtxAttrFmt(GX_VTXFMT3, GX_VA_POS,  GX_POS_XYZ,  GX_S16,   8);
+    GXSetVtxAttrFmt(GX_VTXFMT3, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA4, 0);
+    for (int t=0;t<4;++t) GXSetVtxAttrFmt(GX_VTXFMT3, (GXAttr)(GX_VA_TEX0+t), GX_TEX_ST, GX_S16, 10);
+    GXSetVtxAttrFmt(GX_VTXFMT4, GX_VA_POS,  GX_POS_XYZ,  GX_F32,   0);
+    GXSetVtxAttrFmt(GX_VTXFMT4, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
+    GXSetVtxAttrFmt(GX_VTXFMT4, GX_VA_TEX0, GX_TEX_ST,   GX_S16,   7);
+    GXSetVtxAttrFmt(GX_VTXFMT5, GX_VA_POS,  GX_POS_XYZ,  GX_S16,   3);
+    GXSetVtxAttrFmt(GX_VTXFMT5, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA4, 0);
+    for (int t=0;t<4;++t) GXSetVtxAttrFmt(GX_VTXFMT5, (GXAttr)(GX_VA_TEX0+t), GX_TEX_ST, GX_S16, 8);
+    GXSetVtxAttrFmt(GX_VTXFMT6, GX_VA_POS,  GX_POS_XYZ,  GX_S16,   8);
+    GXSetVtxAttrFmt(GX_VTXFMT6, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA4, 0);
+    for (int t=0;t<4;++t) GXSetVtxAttrFmt(GX_VTXFMT6, (GXAttr)(GX_VA_TEX0+t), GX_TEX_ST, GX_S16, 10);
+    GXSetVtxAttrFmt(GX_VTXFMT7, GX_VA_POS,  GX_POS_XYZ,  GX_S16,   0);
+    GXSetVtxAttrFmt(GX_VTXFMT7, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA4, 0);
+    for (int t=0;t<4;++t) GXSetVtxAttrFmt(GX_VTXFMT7, (GXAttr)(GX_VA_TEX0+t), GX_TEX_ST, GX_S16, 10);
+}
+
+// --- real object-model display (loaded via the real ObjModel_Load) ----------
+extern "C" { void* ObjModel_Load(int id, int loadFlag, int* outSize); int stairfax_model_scan(int want);
+    void ObjModel_InitResourceCaches(void); void ObjModel_InitScratchBuffers(void);
+    void* stairfax_model_load_static(int id);
+    void stairfax_bswap_model_moves(void* header);
+    int Object_ObjAnimSetMove(void* objAnimHandle, int moveId, float moveProgress, unsigned char flags);
+    void modelAnimEvalChannels(uint8_t* dst, void* model, void* channel, float blend, int flags);
+    extern int* gModelAnimOffsetTable; }
+
+// Minimal ObjModel/ObjAnimComponent/ObjAnimState harness wired to a model header, so the REAL
+// objanim move API (Object_ObjAnimSetMove) selects a move + computes framePhase - the same path a
+// spawned GameObject uses. Field offsets: ObjModel.file@0, currentState@0x2C, activeState@0x30;
+// ObjAnimComponent.jointPoseData@0x6C, banks@0x7C, activeMoveProgress@0x9C, activeMove@0xA2,
+// bankIndex@0xAD. The model header IS the ObjAnimDef (union), so bank->animDef = the header.
+struct AnimHarness { uint8_t objModel[0x64]; uint8_t state[0x68]; uint8_t state2[0x68];
+                     uint8_t objAnim[0xC0]; void* banks[1]; uint8_t poseData[0x400];
+                     float dst[64][3][4]; };  // 64 = MAX_JOINTS (defined below)
+static void harnessSetup(AnimHarness* H, uint8_t* header) {
+    memset(H, 0, sizeof *H);
+    *(void**)(H->objModel + 0x00) = header;      // file / animDef (union)
+    *(void**)(H->objModel + 0x30) = H->state;    // activeState  (Object_ObjAnimSetMove writes here)
+    *(void**)(H->objModel + 0x2C) = H->state2;   // currentState
+    H->banks[0] = H->objModel;
+    *(void**)(H->objAnim + 0x7C) = H->banks;     // banks
+    *(void**)(H->objAnim + 0x6C) = H->poseData;  // jointPoseData
+    H->objAnim[0xAD] = 0;                         // bankIndex
+    *(int16_t*)(H->objAnim + 0xA2) = -1;          // activeMove (force move-change on first set)
+}
+// Advance the move through the real objanim API and return the resulting frame command + framePhase.
+static uint8_t* harnessSetMove(AnimHarness* H, int moveId, float progress, float* outFramePhase) {
+    Object_ObjAnimSetMove(H->objAnim, moveId, progress, 0);
+    if (outFramePhase) *outFramePhase = *(float*)(H->state + 0x04);   // framePhase
+    return *(uint8_t**)(H->state + 0x34);                             // moveFrameData
+}
+// modelLoadAnimations() dereferences gModelAnimOffsetTable, allocated only by
+// ObjModel_InitResourceCaches. The port's model loads can run before the engine's own
+// init reaches it, so ensure it once here before any ObjModel_Load.
+static void ensureModelCaches() {
+    if (!gModelAnimOffsetTable) { ObjModel_InitResourceCaches(); ObjModel_InitScratchBuffers(); }
+}
+static inline unsigned mdlBE32(const uint8_t* p){ return ((unsigned)p[0]<<24)|((unsigned)p[1]<<16)|((unsigned)p[2]<<8)|p[3]; }
+static inline unsigned mdlBE16(const uint8_t* p){ return ((unsigned)p[0]<<8)|p[1]; }
+static inline float    mdlBEF32(const uint8_t* p){ union{unsigned u; float f;} x; x.u=mdlBE32(p); return x.f; }
+#define MAX_JOINTS 64
+static unsigned gFrameCounter = 0;   // advances once per sceneRender; drives the anim-test pose
+// 3x4 model-space transform helpers (implicit [0 0 0 1] bottom row).
+static inline void mat34Copy(const float s[3][4], float d[3][4]) {
+    for (int r=0;r<3;++r) for (int c=0;c<4;++c) d[r][c]=s[r][c];
+}
+static inline void mat34Mul(const float a[3][4], const float b[3][4], float o[3][4]) {
+    for (int r=0;r<3;++r) {
+        for (int c=0;c<3;++c) o[r][c]=a[r][0]*b[0][c]+a[r][1]*b[1][c]+a[r][2]*b[2][c];
+        o[r][3]=a[r][0]*b[0][3]+a[r][1]*b[1][3]+a[r][2]*b[2][3]+a[r][3];
+    }
+}
+// Reversed from modelAnimBuildJointMatrices (stage 2, see src/port/docs/anim_playback_RE.md):
+// three joint rotation angles -> a quaternion via the game's exact euler combine, then the
+// standard quaternion -> 3x3 rotation, with `head` as the local translation. The retail code
+// uses sin/cos polynomials of the half-angles; sinf/cosf is the same function. The angle SOURCE
+// (real per-frame keyframe deltas) is the remaining prerequisite; here angles are passed in.
+static void jointLocalMat34(float a0, float a1, float a2, const float head[3], float out[3][4]) {
+    float c0=cosf(a0*0.5f), s0=sinf(a0*0.5f);
+    float c1=cosf(a1*0.5f), s1=sinf(a1*0.5f);
+    float c2=cosf(a2*0.5f), s2=sinf(a2*0.5f);
+    float w = c0*c1*c2 + s0*s1*s2;
+    float x = s0*c1*c2 - c0*s1*s2;
+    float y = c0*s1*c2 + s0*c1*s2;
+    float z = c0*c1*s2 - s0*s1*c2;
+    out[0][0]=1-2*(y*y+z*z); out[0][1]=2*(x*y-w*z);   out[0][2]=2*(x*z+w*y);   out[0][3]=head[0];
+    out[1][0]=2*(x*y+w*z);   out[1][1]=1-2*(x*x+z*z); out[1][2]=2*(y*z-w*x);   out[1][3]=head[1];
+    out[2][0]=2*(x*z-w*y);   out[2][1]=2*(y*z+w*x);   out[2][2]=1-2*(x*x+y*y); out[2][3]=head[2];
+}
+// Read n bits MSB-first from byte stream p starting at bit offset bitPos (GC bitstream order).
+static inline unsigned animReadBits(const uint8_t* p, int bitPos, int n) {
+    unsigned r = 0;
+    for (int i = 0; i < n; ++i) {
+        int b = bitPos + i;
+        r = (r << 1) | ((p[b >> 3] >> (7 - (b & 7))) & 1);
+    }
+    return r;
+}
+// Reversed modelAnimBuildJointMatrices stages 1-3 (see anim_playback_RE.md), functional port:
+// decode move `moveIdx` at fractional frame `frameF` from the (host-swapped) atlas, per joint
+// producing 3 euler angles, then euler->quat->3x4 (jointLocalMat34) + FK. Fills jmtx[slot].
+// Each of a joint's 3 rotation components = a u16 descriptor (base<<4|bitWidth): bitWidth 0 =
+// constant (angle=base); else read bitWidth bits from the current + next frame streams in
+// parallel, interpolate by the subframe fraction, scale (comp 0/1/2 -> x4/x2/x1), add to base.
+static void decodeAtlas(uint8_t* a, float frameF, int moveIdx,
+                        uint8_t* jd, int jc, float accum[][3], float jmtx[][3][4]) {
+    if (!a) return;
+    int streamOff = *(uint16_t*)(a + 2);
+    int frameLen  = a[7];
+    int frameStride = a[8];
+    const uint16_t* desc = (const uint16_t*)(a + 10);   // host-order after the move swap
+    if (frameLen < 1) frameLen = 1;
+    int frame = (int)frameF; if (frame < 0) frame = 0; if (frame > frameLen - 1) frame = frameLen - 1;
+    float frac = frameF - (float)frame; if (frac < 0) frac = 0; if (frac > 1) frac = 1;
+    int fracFixed = (int)(frac * 16384.0f);
+    const uint8_t* cur  = a + streamOff + frameStride * frame;
+    const uint8_t* next = (frame + 1 < frameLen) ? cur + frameStride : cur;
+    if (getenv("STAIRFAX_DESC_DUMP")) { static int once=0; if(!once){once=1;
+        int nDesc=(streamOff-10)/2; fprintf(stderr,"[desc] move %d jc=%d nDesc=%d (jc*3=%d):\n",moveIdx,jc,nDesc,jc*3);
+        for(int k=0;k<nDesc;++k){ unsigned dd=desc[k]; fprintf(stderr," %04x(b%d f%x)",dd,dd&0xf,(dd>>4)&3);
+            if((k&7)==7)fprintf(stderr,"\n"); } fprintf(stderr,"\n"); }}
+    int bitPos = 0, di = 0, nDesc = (streamOff - 10) / 2;
+    int dbgAnim = 0; float dbgMin = 1e9f, dbgMax = -1e9f;
+    // Decode one descriptor: bitWidth 0 = constant (angle=base); else read bitWidth bits from
+    // the current + next frame streams in parallel, interpolate, scale, add base. Advances
+    // di + bitPos. `scale` = channel weight (primary axis x4; extra channels x2 / x1).
+    auto decodeOne = [&](int scale) -> int {
+        if (di >= nDesc) return 0;
+        unsigned d = desc[di++];
+        int bw = d & 0xf;
+        if (bw == 0) return (int16_t)d;
+        int cv = (int)animReadBits(cur,  bitPos, bw);
+        int nv = (int)animReadBits(next, bitPos, bw);
+        bitPos += bw;
+        int delta = (int)((unsigned)(nv - cv) << 18) >> 18;
+        int interp = cv + ((delta * fracFixed) >> 14);
+        ++dbgAnim;
+        return (int16_t)(d & 0xfff0) + interp * scale;
+    };
+    static float A[MAX_JOINTS][3][4];
+    for (int j = 0; j < jc; ++j) {
+        float ang[3];
+        // Three primary rotation axes (all x4). A primary descriptor with bit 0x10 set pulls one
+        // extra secondary-channel descriptor (x2), which if it has 0x20 pulls a third (x1); those
+        // are consumed to stay bit-aligned but don't drive the single-channel pose. (Flag-based
+        // variable component encoding, reversed from modelAnimBuildJointMatrices .L_80007738.)
+        for (int c = 0; c < 3; ++c) {
+            unsigned d = (di < nDesc) ? desc[di] : 0;
+            int sample = decodeOne(4);
+            if (d & 0x10) { unsigned d1 = (di < nDesc) ? desc[di] : 0; decodeOne(2);
+                if (d1 & 0x20) decodeOne(1); }
+            ang[c] = (float)(int16_t)sample * (6.2831853f / 65536.0f);
+            if (ang[c] < dbgMin) dbgMin = ang[c]; if (ang[c] > dbgMax) dbgMax = ang[c];
+        }
+        const uint8_t* b = jd + j * 0x1c; int parent = (int8_t)b[0];
+        float head[3]; for (int c = 0; c < 3; ++c) head[c] = mdlBEF32(b + 4 + c*4);
+        float L[3][4]; jointLocalMat34(ang[0], ang[1], ang[2], head, L);
+        if (parent >= 0 && parent < j) mat34Mul(A[parent], L, A[j]); else mat34Copy(L, A[j]);
+        for (int r = 0; r < 3; ++r) { for (int cc = 0; cc < 3; ++cc) jmtx[j][r][cc] = A[j][r][cc];
+            jmtx[j][r][3] = A[j][r][3] - (A[j][r][0]*accum[j][0] + A[j][r][1]*accum[j][1] + A[j][r][2]*accum[j][2]); }
+    }
+    if (getenv("STAIRFAX_MODEL_DBG")) { static int once=0; if(!once){once=1;
+        fprintf(stderr, "[play] move %d: stride=%d bitsUsed=%d (of %d) desc=%d/%d animComps=%d "
+                "angleRange=[%.1f,%.1f]deg\n", moveIdx, frameStride, bitPos, frameStride*8,
+                di, nDesc, dbgAnim, dbgMin*57.2958f, dbgMax*57.2958f); }}
+}
+
+// The reversed modelAnimBuildJointMatrices, with the REAL retail signature, so the real eval
+// chain (modelAnimEvalChannels -> modelAnimUpdateChannels -> here, all in model.c) drives it.
+// Reads the ObjAnimState `work`: moveFrameData@0x34 (= atlas+6), framePhase@0x04. Produces the
+// per-joint 3x4 skinning matrices (M_j = A_j * T(-accum_j)) into `dst` (0x30 stride), which is
+// exactly what the port's gx_draw_setJointMatrices consumes. Delegates to decodeAtlas.
+extern "C" void modelAnimBuildJointMatrices(int* out, uint8_t* dst, void* work, uint8_t* jd,
+                                            int jc, uint8_t* scratch, int flags, uint8_t mode) {
+    (void)out; (void)scratch; (void)flags; (void)mode;
+    if (!dst || !jd || jc <= 0 || jc > MAX_JOINTS) return;
+    uint8_t* mfd = *(uint8_t**)((uint8_t*)work + 0x34);   // moveFrameData
+    float framePhase = *(float*)((uint8_t*)work + 0x04);
+    if (!mfd) return;
+    static float accum[MAX_JOINTS][3];
+    for (int j = 0; j < jc; ++j) { const uint8_t* b = jd + j*0x1c; int parent = (int8_t)b[0];
+        for (int c = 0; c < 3; ++c) { float head = mdlBEF32(b + 4 + c*4);
+            accum[j][c] = head + ((parent >= 0 && parent < j) ? accum[parent][c] : 0.0f); } }
+    static float jmtx[MAX_JOINTS][3][4];
+    decodeAtlas(mfd - 6, framePhase, -2, jd, jc, accum, jmtx);
+    for (int j = 0; j < jc; ++j) memcpy(dst + j*0x30, jmtx[j], 0x30);
+}
+
+struct Bits { const uint8_t* d; int pos; int bitLen; };
+static int mdlBits(Bits* b,int n){ int pos=b->pos,off=pos>>3; unsigned w=b->d[off]|(b->d[off+1]<<8)|(b->d[off+2]<<16); b->pos=pos+n; return (int)((w>>(pos&7))&((1u<<n)-1)); }
+
+struct DispModel { uint8_t* h; float wx,wy,wz,scale; };
+static std::vector<DispModel> gDispModels;
+
+// Validate a POS layout (posOff/posSz/stride) against a DL: walk it as GX command stream,
+// require every POS index < vertexCount and the stream to end exactly aligned. Mirrors
+// model_view's validateLayout - a skinned model whose descriptor-derived stride is wrong
+// fails this, and detectStride finds the true stride.
+static bool validateStride(const uint8_t* dl, int dlSize, int posOff, int posSz, int stride, int vc) {
+    int p = 0, saw = 0;
+    while (p < dlSize) {
+        unsigned op = dl[p]; if (op == 0) { ++p; continue; }
+        if ((op & 0x80) == 0) return false;
+        if (p + 3 > dlSize) return false;
+        int cnt = (int)mdlBE16(dl + p + 1); p += 3;
+        if (cnt == 0 || p + cnt*stride > dlSize) return false;
+        for (int v = 0; v < cnt; ++v) {
+            const uint8_t* vp = dl + p + v*stride;
+            int pi = posSz==2 ? (int)mdlBE16(vp+posOff) : vp[posOff];
+            if (pi >= vc) return false;
+        }
+        p += cnt*stride; saw = 1;
+    }
+    return saw != 0;
+}
+static int detectStride(const uint8_t* dl, int dlSize, int vc, int posOff, int posSz) {
+    for (int st = posOff + posSz; st <= 64; ++st)
+        if (validateStride(dl, dlSize, posOff, posSz, st, vc)) return st;
+    return 0;
+}
+
+// Draw one loaded model's display lists through gx_draw at (wx,wy,wz), scaled.
+static void renderModel(const DispModel& dm, const float camView[3][4],
+                        const float (*animMtx)[3][4] = nullptr) {
+    uint8_t* h = dm.h;
+    uint8_t* verts   = *(uint8_t**)(h + 0x28);
+    uint8_t* normals = *(uint8_t**)(h + 0x2c);
+    uint8_t* colors  = *(uint8_t**)(h + 0x30);
+    uint8_t* texc    = *(uint8_t**)(h + 0x34);
+    uint8_t* renderOps = *(uint8_t**)(h + 0x38);
+    uint8_t* dlTable = *(uint8_t**)(h + 0xD0);
+    uint8_t* instrs  = *(uint8_t**)(h + 0xD4);
+    int instrBits = (int)(*(uint16_t*)(h + 0xD8)) << 3;
+    int renderOpCount = h[0xF8], dlCount = h[0xF5], jointCount = h[0xF3], texMtxCount = h[0xFA];
+    int vc = *(uint16_t*)(h + 0xE4);
+    if (!instrs || !dlTable || !verts || instrBits <= 0) return;
+    // Skinned models prepend a PNMTXIDX byte + one TEXnMTXIDX byte per texMtxCount to each
+    // vertex; consume them and apply per-joint bind-pose offsets (below) so skinned verts land
+    // at their bone positions instead of collapsing to the origin.
+    int pnmtx = (jointCount > 1) ? (1 + texMtxCount) : 0;
+    if (getenv("STAIRFAX_MODEL_DBG"))
+        fprintf(stderr, "[rm] jc=%d texMtx=%d pnmtx=%d renderOps=%d dlCount=%d\n",
+                jointCount, texMtxCount, pnmtx, renderOpCount, dlCount);
+
+    // model-local -> world (scale + translate), composed with the camera view
+    float mv[3][4];
+    for (int r=0;r<3;++r){ for(int c=0;c<3;++c) mv[r][c]=camView[r][c]*dm.scale;
+        mv[r][3]=camView[r][0]*dm.wx + camView[r][1]*dm.wy + camView[r][2]*dm.wz + camView[r][3]; }
+    GXLoadPosMtxImm(mv, GX_PNMTX0); GXSetCurrentMtx(GX_PNMTX0);
+    gx_draw_setSourceBounds(h, h + 0x80000);
+    gx_draw_setTexture(nullptr);   // untextured for this first slice
+
+    // Bind-pose joint offsets: worldPos = localPos + (accumHead - tail), accumHead summing
+    // bone head translations down the parent chain (matches model_view). Extra joints blend.
+    float gOff[MAX_JOINTS][3]; for (int j=0;j<MAX_JOINTS;++j) gOff[j][0]=gOff[j][1]=gOff[j][2]=0;
+    int slotMap[16]; for (int i=0;i<16;++i) slotMap[i]=i;
+    // Full per-joint skinning matrices M_j (bind-pose = identity). STAIRFAX_ANIM_TEST fills them
+    // with a procedural FK pose to prove the matrix path deforms the mesh; real keyframe decode
+    // will replace the procedural local rotations. animTest gates whether matrices (vs the plain
+    // bind-pose offset path) drive the skin.
+    static float jmtx[MAX_JOINTS][3][4];
+    const char* animPlay = getenv("STAIRFAX_ANIM_PLAY");   // moveIdx to play from real keyframes
+    bool animTest = getenv("STAIRFAX_ANIM_TEST") != nullptr || animPlay != nullptr || animMtx != nullptr;
+    if (pnmtx) {
+        uint8_t* jd = *(uint8_t**)(h + 0x3C); int jc = jointCount;
+        static float accum[MAX_JOINTS][3];
+        if (jd && jc > 0 && jc <= MAX_JOINTS) {
+            for (int j=0;j<jc;++j){ const uint8_t* b=jd+j*0x1c; int parent=(int8_t)b[0];
+                for (int c=0;c<3;++c){ float head=mdlBEF32(b+4+c*4), tail=mdlBEF32(b+0x10+c*4);
+                    accum[j][c]=head + ((parent>=0&&parent<j)?accum[parent][c]:0.0f);
+                    gOff[j][c]=accum[j][c]-tail; } }
+            uint8_t* ed = *(uint8_t**)(h + 0x54); int ec = h[0xF4];
+            for (int i=0;i<ec && jc+i<MAX_JOINTS;++i){ const uint8_t* e=ed+i*3;
+                int g0=e[0],g1=e[1]; float w=e[2]/4.0f, wi=1.0f-w;
+                if (g0<jc+i && g1<jc+i) for (int c=0;c<3;++c) gOff[jc+i][c]=w*gOff[g0][c]+wi*gOff[g1][c]; }
+            if (animMtx) {
+                // Externally-supplied joint matrices (spawned object driven via the real eval chain).
+                for (int j=0;j<jc && j<MAX_JOINTS;++j) mat34Copy(animMtx[j], jmtx[j]);
+                for (int i=0;i<ec && jc+i<MAX_JOINTS;++i){ const uint8_t* e=ed+i*3; int g0=e[0];
+                    if (g0<jc+i) mat34Copy(jmtx[g0], jmtx[jc+i]); }
+            }
+            else if (animPlay) {
+                // REAL playback: decode move animPlay's keyframes (reversed stages 1-3).
+                int moveCount = *(uint16_t*)(h+0xEC);
+                int moveIdx = atoi(animPlay); if (moveIdx < 0 || moveIdx >= moveCount) moveIdx = 0;
+                float speed = getenv("STAIRFAX_ANIM_SPEED") ? atof(getenv("STAIRFAX_ANIM_SPEED")) : 0.3f;
+                uint8_t** md = *(uint8_t***)(h+0x64); uint8_t* atl = md ? md[moveIdx] : nullptr;
+                float flen = atl ? (float)atl[7] : 1.0f; if (flen < 1) flen = 1;
+                if (getenv("STAIRFAX_ANIM_EVALCHAIN")) {
+                    // Fullest routing: the REAL eval chain drives the reversed build.
+                    // Object_ObjAnimSetMove -> modelAnimEvalChannels -> modelAnimUpdateChannels
+                    // -> modelAnimBuildJointMatrices (reimplemented) -> H.dst.
+                    static AnimHarness H; static uint8_t* hHdr = nullptr;
+                    if (hHdr != h) { harnessSetup(&H, h); hHdr = h; }
+                    float progress = fmodf(gFrameCounter * speed, flen) / flen;
+                    Object_ObjAnimSetMove(H.objAnim, moveIdx, progress, 0);
+                    *(uint16_t*)(H.state + 0x58) = 0;   // eventCountdown=0 -> single slot (no null prev-slot)
+                    modelAnimEvalChannels((uint8_t*)H.dst, H.objModel, H.state, progress, 0x7f);
+                    for (int j = 0; j < jc && j < MAX_JOINTS; ++j) mat34Copy(H.dst[j], jmtx[j]);
+                } else if (getenv("STAIRFAX_ANIM_HARNESS")) {
+                    // Route move selection + framePhase through the REAL objanim API.
+                    static AnimHarness H; static uint8_t* hHdr = nullptr;
+                    if (hHdr != h) { harnessSetup(&H, h); hHdr = h; }
+                    float progress = fmodf(gFrameCounter * speed, flen) / flen;
+                    float framePhase = 0; uint8_t* mfd = harnessSetMove(&H, moveIdx, progress, &framePhase);
+                    if (getenv("STAIRFAX_MODEL_DBG")) { static int once=0; if(!once){once=1;
+                        fprintf(stderr,"[harness] move %d: Object_ObjAnimSetMove -> moveFrameData=%p (atlas+6=%p, %s) framePhase=%.2f (direct=%.2f)\n",
+                            moveIdx, (void*)mfd, (void*)(atl+6), mfd==atl+6?"MATCH":"DIFFER", framePhase, fmodf(gFrameCounter*speed, flen)); }}
+                    decodeAtlas(mfd ? mfd - 6 : atl, framePhase, moveIdx, jd, jc, accum, jmtx);
+                } else {
+                    float frameF = fmodf(gFrameCounter * speed, flen);
+                    decodeAtlas(atl, frameF, moveIdx, jd, jc, accum, jmtx);
+                }
+                for (int i=0;i<ec && jc+i<MAX_JOINTS;++i){ const uint8_t* e=ed+i*3; int g0=e[0];
+                    if (g0<jc+i) mat34Copy(jmtx[g0], jmtx[jc+i]); }
+            }
+            else if (animTest) {
+                // Forward kinematics with a procedural per-joint local rotation:
+                //   A_j = A_parent * ( T(head_j) * R(angle_j) ),  M_j = A_j * T(-accum_j)
+                static float A[MAX_JOINTS][3][4];
+                float t = gFrameCounter * 0.05f;
+                for (int j=0;j<jc;++j){ const uint8_t* b=jd+j*0x1c; int parent=(int8_t)b[0];
+                    float head[3]; for(int c=0;c<3;++c) head[c]=mdlBEF32(b+4+c*4);
+                    float a0=0.25f*sinf(t+j*0.6f), a1=0.18f*sinf(t*1.3f+j*0.4f), a2=0.22f*sinf(t*0.7f+j);
+                    float L[3][4]; jointLocalMat34(a0, a1, a2, head, L);
+                    if (parent>=0 && parent<j) mat34Mul(A[parent], L, A[j]); else mat34Copy(L, A[j]);
+                    for (int r=0;r<3;++r){ for(int c=0;c<3;++c) jmtx[j][r][c]=A[j][r][c];
+                        jmtx[j][r][3]=A[j][r][3] - (A[j][r][0]*accum[j][0]+A[j][r][1]*accum[j][1]+A[j][r][2]*accum[j][2]); }
+                }
+                for (int i=0;i<ec && jc+i<MAX_JOINTS;++i){ const uint8_t* e=ed+i*3; int g0=e[0];
+                    if (g0<jc+i) mat34Copy(jmtx[g0], jmtx[jc+i]); }
+            }
+        }
+    }
+
+    Bits bs = { instrs, 0, instrBits };
+    const uint8_t* curOp = nullptr;
+    int posSz=2,nrmP=0,nrmSz=1,clrP=0,clrSz=1,texSz=1,layerCount=0, guard=0;
+    while (bs.pos + 4 <= bs.bitLen && guard++ < 100000) {
+        int op = mdlBits(&bs, 4);
+        if (op == 1) { int idx = mdlBits(&bs, 6); curOp = (idx < renderOpCount) ? renderOps + idx*0x44 : nullptr; }
+        else if (op == 3) {
+            posSz = mdlBits(&bs,1)?2:1;
+            nrmP=0; if(curOp&&(curOp[0x40]&1)){ nrmP=1; nrmSz=mdlBits(&bs,1)?2:1; }
+            clrP=0; if(curOp&&(curOp[0x40]&2)){ clrP=1; clrSz=mdlBits(&bs,1)?2:1; }
+            texSz = mdlBits(&bs,1)?2:1; layerCount = curOp?curOp[0x41]:0;
+        }
+        else if (op == 4) { int cnt=mdlBits(&bs,4); for(int i=0;i<cnt;++i){ int mi=mdlBits(&bs,8); if(i<16) slotMap[i]=mi; } }
+        else if (op == 2) {
+            int dlIdx = mdlBits(&bs, 8);
+            if (dlIdx >= dlCount) continue;
+            const uint8_t* de = dlTable + dlIdx*0x1c;
+            const uint8_t* dl = *(const uint8_t* const*)(de + 0);  // de+0 relocated to a host ptr on load
+            int dls = (int)mdlBE16(de + 4);                        // de+4 (u16 size) is leaf, still BE
+            if (!dl || dls <= 0) continue;
+
+            int posOff = pnmtx;
+            int descStride = pnmtx + posSz + (nrmP?nrmSz:0) + (clrP?clrSz:0) + layerCount*texSz;
+
+            // Per-slot skin: full FK matrices under the anim test, else the bind-pose offset.
+            if (pnmtx && animTest) {
+                float slotMtx[16][3][4];
+                for (int s=0;s<16;++s){ int j=slotMap[s]; if(j<0||j>=MAX_JOINTS)j=0; mat34Copy(jmtx[j], slotMtx[s]); }
+                gx_draw_setJointMatrices(slotMtx, 16);
+            } else if (pnmtx) {
+                float slotOff[16][3];
+                for (int s=0;s<16;++s){ int j=slotMap[s]; if(j<0||j>=MAX_JOINTS)j=0;
+                    slotOff[s][0]=gOff[j][0]; slotOff[s][1]=gOff[j][1]; slotOff[s][2]=gOff[j][2]; }
+                gx_draw_setJointOffsets(slotOff, 16);
+            }
+
+            if (validateStride(dl, dls, posOff, posSz, descStride, vc)) {
+                // Descriptor-derived layout is correct: full attribute path.
+                gx_draw_setForceLayout(0,0,0);
+                GXClearVtxDesc();
+                if (pnmtx) { GXSetVtxDesc(GX_VA_PNMTXIDX, GX_DIRECT);
+                    for (int t=0;t<texMtxCount;++t) GXSetVtxDesc((GXAttr)(GX_VA_TEX0MTXIDX+t), GX_DIRECT); }
+                GXSetVtxDesc(GX_VA_POS, posSz==2?GX_INDEX16:GX_INDEX8);
+                if (nrmP) GXSetVtxDesc(GX_VA_NRM, nrmSz==2?GX_INDEX16:GX_INDEX8);
+                if (clrP) GXSetVtxDesc(GX_VA_CLR0, clrSz==2?GX_INDEX16:GX_INDEX8);
+                for (int t=0;t<layerCount;++t) GXSetVtxDesc((GXAttr)(GX_VA_TEX0+t), texSz==2?GX_INDEX16:GX_INDEX8);
+                GXSetArray(GX_VA_POS, verts, 6);
+                if (nrmP && normals) GXSetArray(GX_VA_NRM, normals, (h[0x24]&0x80)?9:3);
+                if (clrP && colors)  GXSetArray(GX_VA_CLR0, colors, 2);
+                if (layerCount && texc) GXSetArray(GX_VA_TEX0, texc, 4);
+                GXCallDisplayList((void*)dl, (unsigned)dls);
+            } else {
+                // Descriptor stride wrong (common on skinned DLs): autodetect the true
+                // per-vertex stride and draw POS-only, like model_view's fallback.
+                int ps = posSz, st = detectStride(dl, dls, vc, posOff, ps);
+                if (!st) { ps = (posSz==2?1:2); st = detectStride(dl, dls, vc, posOff, ps); }
+                if (st) {
+                    GXClearVtxDesc();
+                    if (pnmtx) GXSetVtxDesc(GX_VA_PNMTXIDX, GX_DIRECT);
+                    GXSetVtxDesc(GX_VA_POS, ps==2?GX_INDEX16:GX_INDEX8);
+                    GXSetArray(GX_VA_POS, verts, 6);
+                    gx_draw_setForceLayout(st, posOff, ps);
+                    GXCallDisplayList((void*)dl, (unsigned)dls);
+                    gx_draw_setForceLayout(0,0,0);
+                }
+            }
+        }
+        else if (op == 5) break;
+        else break;
+    }
+    gx_draw_setSourceBounds(nullptr, nullptr);
+    gx_draw_setJointOffsets(nullptr, 0);
+    gx_draw_setJointMatrices(nullptr, 0);
+    gx_draw_setForceLayout(0, 0, 0);
+}
+
+void loadScene() {
+    gInited = true;
+    const char* dir = getenv("STAIRFAX_MAP_DIR"); if (!dir) dir = "desert";
+    const char* modenv = getenv("STAIRFAX_MAP_MOD");
+    int mod = modenv ? atoi(modenv) : 29;
+
+    char tabPath[256], binPath[256];
+    snprintf(tabPath, sizeof tabPath, "%s/mod%d.tab", dir, mod);
+    snprintf(binPath, sizeof binPath, "%s/mod%d.zlb.bin", dir, mod);
+    int tabSize=0, binSize=0;
+    unsigned char* tab=(unsigned char*)loadFileByPath(tabPath,&tabSize,0);
+    unsigned char* bin=(unsigned char*)loadFileByPath(binPath,&binSize,0);
+    if (!tab || !bin) { fprintf(stderr,"[scene] cannot read %s / %s (ISO mounted?)\n",tabPath,binPath); gInitFailed=true; return; }
+
+    unsigned lastOff=0xffffffff;
+    for (int i=0;i<tabSize/4;++i){
+        unsigned off=asset_mapBlockOffset(tab,tabSize,i); if(off==ASSET_NO_BLOCK||off==lastOff) continue; lastOff=off;
+        Block b; if(asset_loadMapBlock(bin,binSize,tab,tabSize,i,&b.mb)) gBlocks.push_back(std::move(b));
+    }
+    if (gBlocks.empty()) { fprintf(stderr,"[scene] no valid blocks in %s mod%d\n",dir,mod); gInitFailed=true; return; }
+
+    int cols=(int)ceilf(sqrtf((float)gBlocks.size()));
+    for (int i=0;i<(int)gBlocks.size();++i){ Placement pl; pl.block=i;
+        pl.wx=(i%cols)*MAP_BLOCK_WORLD_SIZE; pl.wz=(i/cols)*MAP_BLOCK_WORLD_SIZE; pl.wy=(float)gBlocks[i].mb.yOff;
+        gPlaces.push_back(pl); }
+
+    float wmn[3]={1e18f,1e18f,1e18f}, wmx[3]={-1e18f,-1e18f,-1e18f};
+    for (auto& pl : gPlaces) {
+        AssetMapBlock& b=gBlocks[pl.block].mb; const uint8_t* d=b.data;
+        float scl=1.0f/(float)(1<<ASSET_POS_FRAC[b.fmt&7]); float t[3]={pl.wx,pl.wy,pl.wz};
+        for (int v=0;v<b.vertCount;++v){ const uint8_t* vp=d+b.vertOff+v*6;
+            float w[3]={asset_s16be(vp)*scl+t[0], asset_s16be(vp+2)*scl+t[1], asset_s16be(vp+4)*scl+t[2]};
+            for(int k=0;k<3;++k){ if(w[k]<wmn[k])wmn[k]=w[k]; if(w[k]>wmx[k])wmx[k]=w[k]; } }
+    }
+    for (int k=0;k<3;++k) gWorldCtr[k]=(wmn[k]+wmx[k])*0.5f;
+    gWorldR=1; for(int k=0;k<3;++k){ float e=(wmx[k]-wmn[k])*0.5f; if(e>gWorldR)gWorldR=e; }
+
+    // textures from TEX1 (same route as map_view)
+    char p1t[256],p1b[256]; snprintf(p1t,256,"%s/TEX1.tab",dir); snprintf(p1b,256,"%s/TEX1.bin",dir);
+    int s1t=0,s1b=0; unsigned char* t1tab=(unsigned char*)loadFileByPath(p1t,&s1t,0);
+    unsigned char* t1bin=(unsigned char*)loadFileByPath(p1b,&s1b,0);
+    int texOK=0,texTot=0;
+    if (t1tab&&t1bin){ static unsigned char tbuf[4*1024*1024];
+        for (auto& blk : gBlocks){ AssetMapBlock& b=blk.mb; blk.texCache.assign(b.texCount,nullptr);
+            for (int k=0;k<b.texCount;++k){ int id=(int)(asset_be32(b.data+b.texArrOff+k*4)&0x7fff);
+                int w,h,fmt; unsigned io; texTot++;
+                if (asset_loadTexRecord(t1tab,s1t,t1bin,s1b,id,tbuf,sizeof tbuf,&w,&h,&fmt,&io)){
+                    uint8_t* rgba=gxTexDecode(fmt,w,h,tbuf+io);
+                    if(rgba){ blk.texCache[k]=rhi_createTexture(gRhi,w,h,1,(uint32_t)fmt,rgba); free(rgba); if(blk.texCache[k])texOK++; } } } }
+    }
+    printf("[scene] %s mod%d: %zu blocks, %d/%d textures, worldR=%.0f\n",
+           dir, mod, gBlocks.size(), texOK, texTot, gWorldR);
+}
+
+void updateCamera() {
+    if (!gCamPlaced) {
+        float dist = gWorldR * 2.0f;
+        gCamPos[0]=gWorldCtr[0];
+        gCamPos[1]=gWorldCtr[1]+gWorldR*0.55f;
+        gCamPos[2]=gWorldCtr[2]-dist;
+        gCamYaw=0.0f;
+        // look down at the map center: camera-forward world = (0,sin p,cos p) must
+        // point along (center - pos) = (0, -0.55R, +dist).
+        gCamPitch=atan2f(-gWorldR*0.55f, dist);
+        gCamPlaced=true;
+    }
+    // ~1/60s cadence; scale motion to world size
+    float moveSpd = gWorldR * 0.012f;
+    float lookSpd = 0.03f;
+    float lx = padGetStickX(0)/100.0f, ly = padGetStickY(0)/100.0f;   // WASD / left stick
+    float cx = padGetCX(0)/100.0f,     cy = padGetCY(0)/100.0f;       // IJKL / right stick
+    float up = (padGetRTrigger(0)?1.0f:0.0f) - (padGetLTrigger(0)?1.0f:0.0f);
+
+    gCamYaw   += cx * lookSpd;
+    gCamPitch += cy * lookSpd;
+    if (gCamPitch >  1.5f) gCamPitch =  1.5f;
+    if (gCamPitch < -1.5f) gCamPitch = -1.5f;
+
+    float sy=sinf(gCamYaw), cyw=cosf(gCamYaw);
+    // forward on yaw plane, right perpendicular
+    float fwd[3]={ sy, 0.0f, cyw };
+    float rgt[3]={ cyw, 0.0f, -sy };
+    for (int k=0;k<3;++k) gCamPos[k] += (fwd[k]*ly + rgt[k]*lx) * moveSpd;
+    gCamPos[1] += up * moveSpd;
+}
+
+} // namespace
+
+extern "C" void sceneRender(int a, int b, int c, int d, int e, int f) {
+    (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;
+
+    if (!gInited) {
+        gRhi = vi_host_rhi();
+        if (!gRhi) return;                 // VI not up yet
+        gx_draw_init(); gx_draw_setRhi(gRhi, nullptr); setupVtxFormats();
+        loadScene();
+        stairfax_gamebit_selftest();   // one-shot: verify gamebits after init (env-gated)
+        stairfax_sky_init();           // bring up the real sky DLL's time-of-day clock
+        if (getenv("STAIRFAX_SHOW_MODELS")) {
+            ensureModelCaches();
+            int one[] = { getenv("STAIRFAX_MODEL_ONE") ? atoi(getenv("STAIRFAX_MODEL_ONE")) : 0 };
+            int many[] = {136,141,294,296,477,528,532,533};
+            int* ids = one[0] ? one : many;
+            int nids = one[0] ? 1 : (int)(sizeof(many)/sizeof(many[0]));
+            int ncols = 4;
+            for (int i = 0; i < nids; ++i) {
+                // Real ObjModel_Load now runs the full anim pipeline (MODANIM/AMAP/ANIM);
+                // STAIRFAX_MODEL_STATIC forces the bind-pose-only loader (skips animations).
+                int msz = 0;
+                uint8_t* mh = getenv("STAIRFAX_MODEL_STATIC")
+                    ? (uint8_t*)stairfax_model_load_static(-ids[i])
+                    : (uint8_t*)ObjModel_Load(-ids[i], 0, &msz);
+                if (!mh) continue;
+                stairfax_bswap_model_moves(mh);   // BE anim move data -> host order
+                if (getenv("STAIRFAX_MODEL_DBG")) {
+                    // The model header IS the ObjAnimDef (ObjModel.file/animDef union): moveCount
+                    // @0xEC, moveData@0x64 -> atlas entries (post-swap, host order).
+                    uint8_t* h = mh;
+                    uint8_t** moveData = *(uint8_t***)(h+0x64); int mc = *(uint16_t*)(h+0xEC);
+                    fprintf(stderr, "[animdef] id=%d moveCount=%d moveData=%p jc=%d\n",
+                            ids[i], mc, (void*)moveData, h[0xF3]);
+                    if (moveData && moveData[0]) { uint8_t* a=moveData[0];
+                        int streamOff=*(int16_t*)(a+2), frameLen=a[7], stride=a[8], jc=a[6];
+                        fprintf(stderr, "[animdef] move0 streamOff=%d rootCurve=%d jc=%d frameLen=%d stride=%d desc[0..5]=%04x %04x %04x %04x %04x %04x\n",
+                                streamOff, *(int16_t*)(a+4), jc, frameLen, stride,
+                                *(uint16_t*)(a+10),*(uint16_t*)(a+12),*(uint16_t*)(a+14),
+                                *(uint16_t*)(a+16),*(uint16_t*)(a+18),*(uint16_t*)(a+20)); }
+                }
+                DispModel dm; dm.h = mh;
+                float s = atof(getenv("STAIRFAX_MODEL_SCALE") ? getenv("STAIRFAX_MODEL_SCALE") : "4");
+                if (nids == 1) {
+                    // off to the left of the terrain, at look height, in open space
+                    dm.wx = gWorldCtr[0] - gWorldR * 0.75f;
+                    dm.wy = gWorldCtr[1];
+                    dm.wz = gWorldCtr[2];
+                } else {
+                    dm.wx = gWorldCtr[0] + ((i % ncols) - 1.5f) * (gWorldR * 0.35f);
+                    dm.wy = gWorldCtr[1] + gWorldR * 0.30f;
+                    dm.wz = gWorldCtr[2] + (i / ncols) * (gWorldR * 0.35f);
+                }
+                dm.scale = s;
+                gDispModels.push_back(dm);
+            }
+            fprintf(stderr, "[models] %zu display models loaded\n", gDispModels.size());
+        }
+        if (const char* mid = getenv("STAIRFAX_ROMLIST")) {
+            extern int stairfax_romlist_dump(int mapId, int maxLog);
+            stairfax_romlist_dump(atoi(mid), 8);   // read real object placements from MAPS.bin
+        }
+        if (getenv("STAIRFAX_SPAWN")) {
+            extern int stairfax_romlist_spawn(int mapId, const char* mapName, int maxCount);
+            const char* nm = getenv("STAIRFAX_ROMLIST_NAME"); if (!nm) nm = "frontend";
+            int mid = getenv("STAIRFAX_ROMLIST") ? atoi(getenv("STAIRFAX_ROMLIST")) : 0;
+            stairfax_romlist_spawn(mid, nm, 40);
+            // Reframe the camera on the spawned objects' bounds (they live in the romlist
+            // map's space, not the desert map we loaded for framing).
+            float mn[3]={1e18f,1e18f,1e18f}, mx[3]={-1e18f,-1e18f,-1e18f}; int nf=0;
+            for (int i=0;i<gObjCount;++i){ uint8_t* o=(uint8_t*)gObjList[i];
+                float x=*(float*)(o+0x0C), y=*(float*)(o+0x10), z=*(float*)(o+0x14);
+                if(x<mn[0])mn[0]=x; if(x>mx[0])mx[0]=x; if(y<mn[1])mn[1]=y; if(y>mx[1])mx[1]=y;
+                if(z<mn[2])mn[2]=z; if(z>mx[2])mx[2]=z; nf++; }
+            if(nf>0){ for(int k=0;k<3;++k) gWorldCtr[k]=(mn[k]+mx[k])*0.5f;
+                gWorldR=1; for(int k=0;k<3;++k){ float e=(mx[k]-mn[k])*0.5f; if(e>gWorldR)gWorldR=e; }
+                const char* z=getenv("STAIRFAX_SPAWN_ZOOM"); if(z) gWorldR*=(float)atof(z); // pull camera in
+                gCamPlaced=false; }
+            fprintf(stderr,"[spawn] reframed on %d objects, worldR=%.0f\n", nf, gWorldR);
+        }
+        if (const char* mm = getenv("STAIRFAX_MODEL_TEST")) {
+            extern void* ObjModel_Load(int id, int loadFlag, int* outSize);
+            extern int stairfax_model_scan(int want);
+            int realId = atoi(mm), sz = 0;
+            if (realId == 0) realId = stairfax_model_scan(12);   // 0 = find first real model
+            unsigned char* h = (unsigned char*)ObjModel_Load(-realId, 0, &sz);  // negative id = direct realId
+            if (!h) { fprintf(stderr, "[model] ObjModel_Load(%d) -> NULL\n", realId); }
+            else {
+                int dataSize = *(int*)(h + 0x0c);
+                unsigned char* verts = *(unsigned char**)(h + 0x28);
+                int inRange = verts >= h && verts < h + dataSize;
+                unsigned short vtxCount = *(unsigned short*)(h + 0xE4);
+                unsigned short dlBitLen = *(unsigned short*)(h + 0xD8);
+                fprintf(stderr, "[model] id=%d loaded: dataSize=0x%x texCount=%d jointCount=%d "
+                        "vtxCount=%d dlBits=%d vertsPtr=%p (in-range=%d) outSize=0x%x\n",
+                        realId, dataSize, h[0xF2], h[0xF3], vtxCount, dlBitLen, (void*)verts, inRange, sz);
+            }
+        }
+    }
+    if (gInitFailed) { VIWaitForRetrace(); return; }
+    ++gFrameCounter;   // drives the procedural anim-test pose
+
+    // Real sky DLL advances the time-of-day clock; tint the frame clear by day/night.
+    float skyB = stairfax_sky_tick();
+    vi_set_clear_color(0.02f + skyB * 0.28f, 0.03f + skyB * 0.47f, 0.06f + skyB * 0.74f);
+
+    updateCamera();
+
+    const int W=1280, H=720;
+    float proj[4][4]; memset(proj,0,sizeof proj);
+    float ys=1.0f/tanf((60.0f*3.14159265f/180.0f)*0.5f);
+    float zn=fmaxf(gWorldR*0.01f,1.0f), zf=gWorldR*8.0f+1.0f;
+    proj[0][0]=ys/((float)W/H); proj[1][1]=ys; proj[2][2]=zf/(zf-zn);
+    proj[2][3]=-zn*zf/(zf-zn); proj[3][2]=1.0f;
+    GXSetProjection(proj, GX_PERSPECTIVE);
+
+    // world->view from yaw/pitch/pos: Rot = Rx(pitch)*Ry(yaw)
+    float cyw=cosf(gCamYaw), sy=sinf(gCamYaw), cp=cosf(gCamPitch), sp=sinf(gCamPitch);
+    float Ry[3][3]={{cyw,0,sy},{0,1,0},{-sy,0,cyw}};
+    float Rx[3][3]={{1,0,0},{0,cp,-sp},{0,sp,cp}};
+    float Rot[3][3];
+    for(int r=0;r<3;++r)for(int cc=0;cc<3;++cc){float s2=0;for(int k=0;k<3;++k)s2+=Rx[r][k]*Ry[k][cc];Rot[r][cc]=s2;}
+    float camView[3][4];
+    for(int r=0;r<3;++r){ float t=0; for(int k=0;k<3;++k){ camView[r][k]=Rot[r][k]; t-=Rot[r][k]*gCamPos[k]; } camView[r][3]=t; }
+
+    bool drawMap = !getenv("STAIRFAX_NO_MAP");
+    for (auto& pl : gPlaces) {
+        if (!drawMap) break;
+        Block& blk=gBlocks[pl.block]; AssetMapBlock& bb=blk.mb; const uint8_t* dd=bb.data;
+        gx_draw_setSourceBounds(dd, dd + bb.size);  // clamp indexed fetches to this block
+        GXClearVtxDesc();
+        GXSetVtxDesc(GX_VA_POS,  bb.posSz==2?GX_INDEX16:GX_INDEX8);
+        GXSetVtxDesc(GX_VA_CLR0, bb.clrSz==2?GX_INDEX16:GX_INDEX8);
+        GXSetVtxDesc(GX_VA_TEX0, bb.texSz==2?GX_INDEX16:GX_INDEX8);
+        GXSetArray(GX_VA_POS, (void*)(dd+bb.vertOff), 6);
+        if(bb.colOff) GXSetArray(GX_VA_CLR0, (void*)(dd+bb.colOff), 2);
+        if(bb.texOff) GXSetArray(GX_VA_TEX0, (void*)(dd+bb.texOff), 4);
+
+        float mv[3][4];
+        for(int r=0;r<3;++r){ mv[r][0]=camView[r][0]; mv[r][1]=camView[r][1]; mv[r][2]=camView[r][2];
+            mv[r][3]=camView[r][0]*pl.wx+camView[r][1]*pl.wy+camView[r][2]*pl.wz+camView[r][3]; }
+        GXLoadPosMtxImm(mv, GX_PNMTX0);
+        GXSetCurrentMtx(GX_PNMTX0);
+
+        for (int i=0;i<bb.dlCount;++i){ const uint8_t* rec=dd+bb.dlBase+i*0x1C;
+            unsigned o=asset_be32(rec); int sz=asset_be16(rec+4); int shIdx=rec[0x13];
+            RhiTexture* tex=nullptr;
+            if(shIdx<bb.shCount){ int ti=(int)asset_be32(dd+bb.shOff+shIdx*0x44+0x24);
+                if(ti>=0 && ti<(int)blk.texCache.size()) tex=blk.texCache[ti]; }
+            gx_draw_setTexture(tex);
+            if(sz>0 && o+(unsigned)sz<=bb.size) GXCallDisplayList((void*)(dd+o), (unsigned)sz);
+        }
+    }
+
+    // Real object models loaded by the real ObjModel_Load, drawn via gx_draw.
+    for (auto& dm : gDispModels) renderModel(dm, camView);
+
+    // Spawned romlist objects: draw each GameObject's model. STAIRFAX_SPAWN_GRID lays them
+    // out compactly near the camera (visible together); otherwise at their world positions.
+    if (getenv("STAIRFAX_SPAWN")) {
+        int grid = getenv("STAIRFAX_SPAWN_GRID") ? 1 : 0;
+        int cols = 6, cell = 0;
+        static int logged = 0;
+        for (int i = 0; i < gObjCount; ++i) {
+            uint8_t* o = (uint8_t*)gObjList[i];
+            void* om = Obj_GetActiveModel(o);
+            uint8_t* h = om ? *(uint8_t**)om : nullptr;   // ObjModel.file (offset 0)
+            if (getenv("STAIRFAX_MODEL_DBG") && i < 6)
+                fprintf(stderr, "[spawn] obj %d o=%p om=%p h=%p\n", i, (void*)o, om, (void*)h);
+            if (!h) continue;
+            if (!logged) fprintf(stderr, "[spawn] obj %d jointCount=%d vtxCount=%d\n",
+                                 i, h[0xF3], *(uint16_t*)(h + 0xE4));
+            DispModel dm; dm.h = h; dm.scale = 1.0f;
+            if (grid) {
+                float sp = gWorldR * 0.28f;
+                dm.wx = gWorldCtr[0] + ((cell % cols) - 2.5f) * sp;
+                dm.wy = gWorldCtr[1];
+                dm.wz = gWorldCtr[2] + (cell / cols) * sp;
+                cell++;
+            } else {
+                dm.wx = *(float*)(o + 0x0C); dm.wy = *(float*)(o + 0x10); dm.wz = *(float*)(o + 0x14);
+            }
+            // Real spawned-object animation: drive the object's own ObjAnimComponent (o) + ObjModel
+            // (om) through the full eval chain, exactly as the game does. STAIRFAX_SPAWN_ANIM=<move>.
+            const char* spawnAnim = getenv("STAIRFAX_SPAWN_ANIM");
+            bool animated = false;
+            if (spawnAnim) {
+                int mc = *(uint16_t*)(h + 0xEC);
+                uint8_t** md = *(uint8_t***)(h + 0x64);
+                int moveIdx = atoi(spawnAnim); if (moveIdx < 0 || moveIdx >= mc) moveIdx = 0;
+                if (mc > 0 && md) {
+                    // Byte-swap the move data once per unique model header (spawned models load BE).
+                    static uint8_t* swapped[256]; static int nSwapped = 0;
+                    bool seen = false; for (int k=0;k<nSwapped;++k) if (swapped[k]==h){seen=true;break;}
+                    if (!seen) { stairfax_bswap_model_moves(h); if(nSwapped<256) swapped[nSwapped++]=h; }
+                    float speed = getenv("STAIRFAX_ANIM_SPEED") ? atof(getenv("STAIRFAX_ANIM_SPEED")) : 0.3f;
+                    uint8_t* atl = md[moveIdx]; float flen = atl ? (float)atl[7] : 1.0f; if (flen < 1) flen = 1;
+                    float progress = fmodf(gFrameCounter * speed, flen) / flen;
+                    void* st = *(void**)((uint8_t*)om + 0x30);   // ObjModel.activeState
+                    if (st) {
+                        Object_ObjAnimSetMove(o, moveIdx, progress, 0);   // o = GameObject = ObjAnimComponent
+                        *(uint16_t*)((uint8_t*)st + 0x58) = 0;            // eventCountdown -> single slot
+                        static float spawnDst[MAX_JOINTS][3][4];
+                        modelAnimEvalChannels((uint8_t*)spawnDst, om, st, progress, 0x7f);
+                        renderModel(dm, camView, spawnDst);
+                        animated = true;
+                    }
+                }
+            }
+            if (!animated) renderModel(dm, camView);
+        }
+        logged = 1;
+    }
+
+    VIWaitForRetrace();   // interim present point (see file header)
+
+    // Dev-only: one-shot window capture N frames in (STAIRFAX_CAP=path[,frame]).
+    static int sFrame = 0; static int sCapDone = 0;
+    ++sFrame;
+    const char* cap = getenv("STAIRFAX_CAP");
+    if (cap && !sCapDone) {
+        const char* fenv = getenv("STAIRFAX_CAP_FRAME");
+        int capFrame = fenv ? atoi(fenv) : 60;
+        if (sFrame >= capFrame) {
+            if (plat_window_capture_bmp(vi_host_window(), cap))
+                printf("[scene] captured frame %d -> %s\n", sFrame, cap);
+            sCapDone = 1;
+        }
+    }
+}

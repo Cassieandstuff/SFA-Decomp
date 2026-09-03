@@ -46,6 +46,7 @@ void*   loadFileByPath(char* path, int* outSize, int unused);
 void*   fileLoad(int id, int heap);
 int     fileLoadToBuffer(int id, void* buffer);
 int     fileLoadToBufferOffset(int id, void* dst, int offset, int size);
+void    dvd_register_buffer(int id, void* buf, int size);
 int32_t fileGetSize(int id);
 
 // Host control. discRoot may be an extracted-disc directory OR a GameCube ISO/GCM
