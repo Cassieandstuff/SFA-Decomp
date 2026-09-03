@@ -246,21 +246,32 @@ static void readAttrValue(GXAttr a, VatAttr* v, const unsigned char* src, int* c
 // --- decode + draw ---------------------------------------------------------
 #define GX_MAX_BATCH 16384
 static RhiTexVertex gVerts[GX_MAX_BATCH];
+// Per-vertex validity: a vertex whose POS came from an out-of-bounds indexed fetch is
+// left at the origin (garbage), which would stretch any triangle using it into a "spike".
+// We mark such vertices invalid and drop every triangle that references one.
+static unsigned char gVertOk[GX_MAX_BATCH];
+
+// Emit a triangle only if all three source vertices decoded cleanly.
+static inline int emitTri(RhiTexVertex* out, int n, int cap, int a, int b, int c) {
+    if (n+3 > cap) return n;
+    if (!gVertOk[a] || !gVertOk[b] || !gVertOk[c]) return n;   // skip spike triangles
+    out[n++]=gVerts[a]; out[n++]=gVerts[b]; out[n++]=gVerts[c];
+    return n;
+}
 
 static int expandTriangles(RhiTexVertex* out, int cap, int nverts, u8 prim) {
     int n = 0;
     if (prim == GX_TRIANGLES) {
-        for (int i = 0; i+3 <= nverts && n+3 <= cap; i += 3) { out[n++]=gVerts[i]; out[n++]=gVerts[i+1]; out[n++]=gVerts[i+2]; }
+        for (int i = 0; i+3 <= nverts; i += 3) n = emitTri(out,n,cap,i,i+1,i+2);
     } else if (prim == GX_TRIANGLESTRIP) {
-        for (int i = 2; i < nverts && n+3 <= cap; ++i)
-            if (i&1) { out[n++]=gVerts[i-1]; out[n++]=gVerts[i-2]; out[n++]=gVerts[i]; }
-            else     { out[n++]=gVerts[i-2]; out[n++]=gVerts[i-1]; out[n++]=gVerts[i]; }
+        for (int i = 2; i < nverts; ++i)
+            n = (i&1) ? emitTri(out,n,cap,i-1,i-2,i) : emitTri(out,n,cap,i-2,i-1,i);
     } else if (prim == GX_TRIANGLEFAN) {
-        for (int i = 2; i < nverts && n+3 <= cap; ++i) { out[n++]=gVerts[0]; out[n++]=gVerts[i-1]; out[n++]=gVerts[i]; }
+        for (int i = 2; i < nverts; ++i) n = emitTri(out,n,cap,0,i-1,i);
     } else if (prim == GX_QUADS) {
-        for (int i = 0; i+4 <= nverts && n+6 <= cap; i += 4) {
-            out[n++]=gVerts[i]; out[n++]=gVerts[i+1]; out[n++]=gVerts[i+2];
-            out[n++]=gVerts[i]; out[n++]=gVerts[i+2]; out[n++]=gVerts[i+3];
+        for (int i = 0; i+4 <= nverts; i += 4) {
+            n = emitTri(out,n,cap,i,i+1,i+2);
+            n = emitTri(out,n,cap,i,i+2,i+3);
         }
     }
     return n;
@@ -274,7 +285,7 @@ static int decodePrim(const unsigned char* src, GXVtxFmt fmt, u8 prim, int nvert
     for (int vi = 0; vi < nverts; ++vi) {
         if (maxBytes > 0 && c >= maxBytes) { nverts = vi; break; }  // don't read past the DL
         RhiTexVertex out; out.x=out.y=out.z=0; out.rgba=0xFFFFFFFFu; out.u=out.v=0;
-        int pnmtx = 0;
+        int pnmtx = 0, posOk = 1;   // posOk=0 -> POS index was out of bounds, drop this vertex
         if (gForceStride > 0) {  // explicit POS-only layout (autodetected skinned fallback)
             const unsigned char* vp = src + c;
             if (gHaveJointOff) pnmtx = vp[0];
@@ -289,9 +300,10 @@ static int decodePrim(const unsigned char* src, GXVtxFmt fmt, u8 prim, int nvert
                 }
             }
             if (inBounds) { int ac = 0; readAttrValue(GX_VA_POS, &gVat[fmt][GX_VA_POS], ar->base + idx*ar->stride, &ac, &out, &haveTex); }
+            else posOk = 0;
             c += gForceStride;
             applyJointSkin(&out, pnmtx);
-            gVerts[vi] = out;
+            gVerts[vi] = out; gVertOk[vi] = (unsigned char)posOk;
             continue;
         }
         for (GXAttr a = 0; a < GX_VA_MAX_ATTR; ++a) {
@@ -313,12 +325,13 @@ static int decodePrim(const unsigned char* src, GXVtxFmt fmt, u8 prim, int nvert
                     }
                 }
                 if (inBounds) { int ac = 0; readAttrValue(a, v, ar->base + idx*ar->stride, &ac, &out, &haveTex); }
+                else if (a == GX_VA_POS) posOk = 0;   // bad position -> drop vertex, not a spike
             } else { // GX_DIRECT: read inline from the stream
                 readAttrValue(a, v, src, &c, &out, &haveTex);
             }
         }
         applyJointSkin(&out, pnmtx);
-        gVerts[vi] = out;
+        gVerts[vi] = out; gVertOk[vi] = (unsigned char)posOk;
     }
     if (gRhi) {
         float mvp[16]; computeMVP(mvp); rhi_setColorTransform(gRhi, mvp);
