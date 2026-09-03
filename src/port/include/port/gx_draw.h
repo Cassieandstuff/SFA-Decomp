@@ -24,6 +24,9 @@ void gx_draw_setSourceBounds(const void* lo, const void* hi);
 void gx_draw_setJointOffsets(const float off[][3], int n);
 void gx_draw_setJointMatrices(const float m[][3][4], int n);
 void gx_draw_setForceLayout(int stride, int posOff, int posSz);
+// Real GX skinning: transform each vertex by gPosMtx[PNMTXIDX/3] then project by gProj alone
+// (the retail model render path). Off = interim gJointOff/gJointMtx path. Set around a draw.
+void gx_draw_setRealSkin(int on);
 
 // Real GX entry point (also in dolphin/gx/GXDispList.h): replay a recorded command
 // buffer of primitive draws. Indexed attributes read from GXSetArray bases.

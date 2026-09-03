@@ -51,6 +51,8 @@ extern "C" {
     void** gObjList; int gObjCount;
     void* Obj_GetActiveModel(void* obj);
     void* stairfax_spawn_player(int seq, float x, float y, float z);  // port-side player spawn
+    void  stairfax_render_player(void* obj, int move, float progress); // real objRenderModel path
+    extern float gPortViewMatrix[3][4];                              // port->real camera bridge
     // host input (pad_input.c)
     int padGetStickX(int); int padGetStickY(int);
     int padGetCX(int);     int padGetCY(int);
@@ -955,9 +957,21 @@ extern "C" void sceneRender(int a, int b, int c, int d, int e, int f) {
         logged = 1;
     }
 
-    // Player: dedicated render + animation with its own harness, so the walk cycle runs
-    // continuously and idle/walk move selection is under the controller's control.
-    if (gPlayerObj) {
+    // Player: render through the REAL model path (objRenderModel -> modelDoRenderInstrs), which
+    // decodes the character's true vertex/DL format + skinning. Bridge the port camera into the
+    // real path via gPortViewMatrix (Camera_GetViewMatrix returns it). STAIRFAX_PLAYER_INTERIM
+    // falls back to the old hand-rolled harness for comparison.
+    if (gPlayerObj && !getenv("STAIRFAX_PLAYER_INTERIM")) {
+        ensureModelCaches();
+        for (int r=0;r<3;++r) for (int cc=0;cc<4;++cc) gPortViewMatrix[r][cc]=camView[r][cc];
+        int idleMove = getenv("STAIRFAX_PLAYER_IDLE") ? atoi(getenv("STAIRFAX_PLAYER_IDLE")) : 0;
+        int walkMove = getenv("STAIRFAX_PLAYER_WALK") ? atoi(getenv("STAIRFAX_PLAYER_WALK")) : idleMove;
+        int move = gPlayerMoving ? walkMove : idleMove;
+        float speed = getenv("STAIRFAX_ANIM_SPEED") ? (float)atof(getenv("STAIRFAX_ANIM_SPEED")) : 0.3f;
+        float progress = fmodf(gFrameCounter * speed * 0.03f, 1.0f);
+        stairfax_render_player(gPlayerObj, move, progress);
+    }
+    else if (gPlayerObj) {
         ensureModelCaches();
         uint8_t* o = gPlayerObj;
         void* om = Obj_GetActiveModel(o);

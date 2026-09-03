@@ -148,6 +148,39 @@ void* stairfax_spawn_player(int seq, float x, float y, float z) {
     return obj;
 }
 
+// Render the player through the REAL model render path (objRenderModel -> modelDoRenderInstrs),
+// with real GX skinning enabled. SEH-guarded: the real path pulls light/anim state that may not
+// be fully set up yet, so catch a fault rather than take down the frame.
+extern void objRenderModel(void* obj);
+extern void gx_draw_setRealSkin(int on);
+extern int  Object_ObjAnimSetMove(void* objAnim, int move, float progress, unsigned char flags);
+extern void* Obj_GetActiveModel(void* obj);
+void stairfax_render_player(void* obj, int move, float progress) {
+    gx_draw_setRealSkin(1);
+    // Diagnostic: STAIRFAX_PLAYER_BINDPOSE sets ModelFileHeader.flags (@0x02) bit 1, which makes
+    // modelDoRenderInstrs skip ObjModel_UpdateAnimMatrices - renders bind pose, proving the real
+    // interpreter decodes the geometry without needing the (not-yet-wired) character anim data.
+    int bindpose = getenv("STAIRFAX_PLAYER_BINDPOSE") != 0;
+    __try {
+        if (bindpose) {
+            void* mdl = Obj_GetActiveModel(obj);
+            void* file = mdl ? *(void**)mdl : 0;   // ObjModel.file @ offset 0
+            if (file) *(unsigned short*)((char*)file + 2) |= 2;
+        } else {
+            // The player's ObjAnimComponent is the GameObject itself (anim at offset 0). Set a
+            // valid move so ObjModel_UpdateAnimMatrices/BuildAnimBlendTable read initialised state.
+            Object_ObjAnimSetMove(obj, move, progress, 0);
+        }
+        objRenderModel(obj);
+    }
+    __except (playerFaultFilter(GetExceptionInformation())) {
+        HMODULE hm = GetModuleHandleA(NULL);
+        fprintf(stderr, "[player] render FAULT code=0x%08lx addr=%p rva=0x%tx\n",
+                gPlayerFaultCode, gPlayerFaultAddr, (char*)gPlayerFaultAddr - (char*)hm);
+    }
+    gx_draw_setRealSkin(0);
+}
+
 int stairfax_romlist_dump(int mapId, int maxLog) {
     const char* mapName = getenv("STAIRFAX_ROMLIST_NAME");
     if (!mapName) mapName = "frontend";

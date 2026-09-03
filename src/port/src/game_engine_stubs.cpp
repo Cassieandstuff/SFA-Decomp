@@ -176,7 +176,6 @@ int mapSetup(){ trace("mapSetup"); return 0; }
 int mapUnload(){ trace("mapUnload"); return 0; }
 int mapUpdateCameraPosByTransformSpace(){ trace("mapUpdateCameraPosByTransformSpace"); return 0; }
 int newshadows_initProceduralTextures(){ trace("newshadows_initProceduralTextures"); return 0; }
-int objRenderFuzz(){ trace("objRenderFuzz"); return 0; }
 int objRenderModelAndHitVolumes(){ trace("objRenderModelAndHitVolumes"); return 0; }
 int playerInitFuncPtrsEntry(){ trace("playerInitFuncPtrsEntry"); return 0; }
 int resetSomeGxFlags(){ trace("resetSomeGxFlags"); return 0; }

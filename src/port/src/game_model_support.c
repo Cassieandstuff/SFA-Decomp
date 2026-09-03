@@ -337,7 +337,16 @@ void* animationLoad(void) { return 0; }
 // modelAnimBuildJointMatrices is now the reversed real implementation in game_scene.cpp.
 void  modelRenderInterpolateRootTransform(void) { }
 void  modelRenderDecodeAdpcm(void) { }
-void  modelRenderInstrsState_init(void) { }
+// Real render-instruction bitstream state (from modelEngine.c, which the port can't compile).
+// The interpreter (objprint_dolphin.c) needs this to actually initialise the bit cursor.
+typedef struct { unsigned char* instrs; int byteCount; int bitCount; int fieldC; int bit; } RIState;
+void modelRenderInstrsState_init(void* st, void* instrs, int bitCount, int fieldC) {
+    RIState* s = (RIState*)st;
+    s->byteCount = (bitCount >> 3) + ((bitCount & 7) ? 1 : 0);
+    s->bitCount = bitCount; s->fieldC = fieldC; s->instrs = (unsigned char*)instrs; s->bit = 0;
+}
+int  modelRenderInstrsState_getBit(void* st) { return ((RIState*)st)->bit; }
+void modelRenderInstrsState_setBit(void* st, int bit) { ((RIState*)st)->bit = bit; }
 void  ShaderDef_free(void) { }
 void  shaderInit(void) { }
 void  objFrozenRenderCb(void) { }

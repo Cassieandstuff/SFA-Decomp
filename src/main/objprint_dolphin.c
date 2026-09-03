@@ -839,7 +839,7 @@ void objFuzzSetupGxState(void* objArg)
 
 
 
-extern PPCWGPipe GXWGFifo : (0xCC008000);
+extern volatile PPCWGPipe GXWGFifo AT_ADDRESS(0xCC008000);
 
 extern u8 gObjGxPosMtxIdTable[12];
 

@@ -142,9 +142,31 @@ void gx_draw_setForceLayout(int stride, int posOff, int posSz) {
     gForceStride = stride; gForcePosOff = posOff; gForcePosSz = posSz;
 }
 
+// Real GX skinning mode: each vertex is transformed by the GX position matrix its PNMTXIDX
+// selects (gPosMtx[PNMTXIDX/3], loaded via GXLoadPosMtxImm), then projected by gProj alone -
+// i.e. the retail model render path. Off by default (the interim renderModel keeps using the
+// gJointOff/gJointMtx offset path + full MVP). The real model renderer sets this around a draw.
+static int gRealSkin;
+void gx_draw_setRealSkin(int on) { gRealSkin = on; }
+// Transform one vertex to view space by its per-vertex matrix (real mode) or the interim skin.
+static void skinVertex(RhiTexVertex* v, int pnmtx, int havePnmtx) {
+    if (gRealSkin) {
+        int slot = havePnmtx ? (pnmtx/3) : gCurMtx;
+        if ((unsigned)slot >= GX_MTX_SLOTS) slot = 0;
+        const float (*M)[4] = gPosMtx[slot];
+        float x=v->x, y=v->y, z=v->z;
+        v->x = M[0][0]*x + M[0][1]*y + M[0][2]*z + M[0][3];
+        v->y = M[1][0]*x + M[1][1]*y + M[1][2]*z + M[1][3];
+        v->z = M[2][0]*x + M[2][1]*y + M[2][2]*z + M[2][3];
+    } else {
+        applyJointSkin(v, pnmtx);
+    }
+}
+
 // --- GX transform API ------------------------------------------------------
 void GXSetProjection(const f32 mtx[4][4], GXProjectionType type) { (void)type; memcpy(gProj, mtx, sizeof(float)*16); }
 void GXLoadPosMtxImm(const f32 mtx[3][4], u32 id) { u32 s = id/3; if (s < GX_MTX_SLOTS) memcpy(gPosMtx[s], mtx, sizeof(float)*12); }
+void GXLoadNrmMtxImm(const f32 mtx[3][4], u32 id) { (void)mtx; (void)id; }  // normals unused in the untextured path
 void GXLoadTexMtxImm(const f32 mtx[][4], u32 id, GXTexMtxType type) { (void)mtx; (void)id; (void)type; }
 void GXSetCurrentMtx(u32 id) { u32 s = id/3; if (s < GX_MTX_SLOTS) gCurMtx = (int)s; }
 
@@ -283,6 +305,7 @@ static int expandTriangles(RhiTexVertex* out, int cap, int nverts, u8 prim) {
 static int decodePrim(const unsigned char* src, GXVtxFmt fmt, u8 prim, int nverts, int maxBytes) {
     if (nverts > GX_MAX_BATCH) nverts = GX_MAX_BATCH;
     int c = 0, haveTex = 0;
+    int havePnmtx = (gDesc[GX_VA_PNMTXIDX] != GX_NONE) || gHaveJointOff;
     for (int vi = 0; vi < nverts; ++vi) {
         if (maxBytes > 0 && c >= maxBytes) { nverts = vi; break; }  // don't read past the DL
         RhiTexVertex out; out.x=out.y=out.z=0; out.rgba=0xFFFFFFFFu; out.u=out.v=0;
@@ -303,7 +326,7 @@ static int decodePrim(const unsigned char* src, GXVtxFmt fmt, u8 prim, int nvert
             if (inBounds) { int ac = 0; readAttrValue(GX_VA_POS, &gVat[fmt][GX_VA_POS], ar->base + idx*ar->stride, &ac, &out, &haveTex); }
             else posOk = 0;
             c += gForceStride;
-            applyJointSkin(&out, pnmtx);
+            skinVertex(&out, pnmtx, havePnmtx);
             gVerts[vi] = out; gVertOk[vi] = (unsigned char)posOk;
             continue;
         }
@@ -331,11 +354,14 @@ static int decodePrim(const unsigned char* src, GXVtxFmt fmt, u8 prim, int nvert
                 readAttrValue(a, v, src, &c, &out, &haveTex);
             }
         }
-        applyJointSkin(&out, pnmtx);
+        skinVertex(&out, pnmtx, havePnmtx);
         gVerts[vi] = out; gVertOk[vi] = (unsigned char)posOk;
     }
     if (gRhi) {
-        float mvp[16]; computeMVP(mvp); rhi_setColorTransform(gRhi, mvp);
+        float mvp[16];
+        if (gRealSkin) { for (int i=0;i<4;++i) for (int j=0;j<4;++j) mvp[i*4+j]=gProj[i][j]; }
+        else computeMVP(mvp);
+        rhi_setColorTransform(gRhi, mvp);
         static RhiTexVertex tri[GX_MAX_BATCH*3];
         int n = expandTriangles(tri, (int)(sizeof(tri)/sizeof(tri[0])), nverts, prim);
         if (dbg()) fprintf(stderr, "[gxdraw] prim=%02x fmt=%d nv=%d tris=%d v0=(%.1f,%.1f,%.1f) rgba=%08x tex=%d\n",
