@@ -598,7 +598,8 @@ extern "C" void sceneRender(int a, int b, int c, int d, int e, int f) {
         stairfax_sky_init();           // bring up the real sky DLL's time-of-day clock
         if (getenv("STAIRFAX_SHOW_MODELS")) {
             ensureModelCaches();
-            stairfax_model_perdir(1);   // the viewer browses the per-dir terrain/prop set
+            // per-dir terrain/prop set by default; STAIRFAX_MODEL_GLOBAL views root/global object models
+            if (!getenv("STAIRFAX_MODEL_GLOBAL")) stairfax_model_perdir(1);
             int one[] = { getenv("STAIRFAX_MODEL_ONE") ? atoi(getenv("STAIRFAX_MODEL_ONE")) : 0 };
             int many[] = {136,141,294,296,477,528,532,533};
             int* ids = one[0] ? one : many;
@@ -776,8 +777,9 @@ extern "C" void sceneRender(int a, int b, int c, int d, int e, int f) {
                 h = mh;
             }
             if (getenv("STAIRFAX_SPAWN_DBG"))
-                fprintf(stderr, "[spawn] obj %d modelCount=%d mid0=%d om=%p h=%p\n",
-                        i, mcnt, (mids&&mcnt>0)?mids[0]:0, om, (void*)h);
+                fprintf(stderr, "[spawn] obj %d mid0=%d h=%p loadedMoveCount=%d jc=%d\n",
+                        i, (mids&&mcnt>0)?mids[0]:0, (void*)h,
+                        h?*(uint16_t*)(h+0xEC):-1, h?h[0xF3]:-1);
             if (!h) continue;
             if (!logged) fprintf(stderr, "[spawn] obj %d jointCount=%d vtxCount=%d\n",
                                  i, h[0xF3], *(uint16_t*)(h + 0xE4));
