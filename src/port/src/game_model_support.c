@@ -382,7 +382,16 @@ void stairfax_bswap_model_moves(void* header) {
 }
 
 // --- anim / render helpers (not on the init path yet) -----------------------
-void* animationLoad(void) { return 0; }
+// The real move-frame loader. objanim's ObjAnim_LoadCachedMove -> animationLoad streams a cached
+// move's keyframes into the model's move cache (the real gameloop.c routes this through a type-7
+// loadAsset -> loadAnimation; the port has no gameloop.c, so call loadAnimation directly). Left as
+// the return-0 stub, no move ever loaded -> the anim decode read a placeholder (nSlots=1) and every
+// character stayed in bind/T-pose. loadAnimation(animDef, animId, moveIndex, cache) reads the move
+// from PREANIM/ANIM/AMAP via the same asset loaders the model/map paths use.
+extern void* loadAnimation(void* hdr, short id, int moveIndex, unsigned char* bufout);
+void animationLoad(void** out, int animId, int moveIndex, unsigned char* cache, void* animDef) {
+    if (out) *out = loadAnimation(animDef, (short)animId, moveIndex, cache);
+}
 // modelAnimBuildJointMatrices is now the reversed real implementation in game_scene.cpp.
 void  modelRenderInterpolateRootTransform(void) { }
 void  modelRenderDecodeAdpcm(void) { }

@@ -185,6 +185,13 @@ void stairfax_render_player(void* obj, int move, float progress) {
     {
         unsigned char* am = (unsigned char*)Obj_GetActiveModel(obj);
         if (am) {
+            // Re-arm the per-frame animation update. ObjModel_UpdateAnimMatrices (in the render) only
+            // re-evaluates the skeleton when ObjModel.bufferFlags bit 3 (@0x18) is CLEAR, and sets it
+            // after each update; the real Obj_UpdateAllObjects clears it every frame (object.c:2379).
+            // The port drives playerUpdate directly and never runs that loop, so the flag stayed set
+            // and the anim evaluated exactly ONCE (frozen bind/T-pose) even as currentMoveProgress
+            // advanced. Clear it here so the pose tracks the move each frame.
+            *(unsigned short*)(am + 0x18) &= (unsigned short)~0x8;
             unsigned char* v0 = *(unsigned char**)(am + 0x1c);       // vtxBuf[0]
             unsigned char* v1 = *(unsigned char**)(am + 0x20);       // vtxBuf[1]
             unsigned char* file = *(unsigned char**)(am + 0);
@@ -203,8 +210,9 @@ void stairfax_render_player(void* obj, int move, float progress) {
             if (file) *(unsigned short*)((char*)file + 2) |= 2;
         } else if (getenv("STAIRFAX_PLAYER_SETMOVE")) {
             // The player's ObjAnimComponent is the GameObject itself (anim at offset 0). Setting a
-            // move is optional: ObjModel_LoadAnimData's modelAnimResetState already leaves a valid
-            // moveCacheSlot=0 state, so by default we rely on that and let UpdateAnimMatrices run.
+            // move here loads it into the ACTIVE anim channel, but the render evaluates the CURRENT
+            // channel (animStateA); the port doesn't yet run the per-frame ObjAnim update that
+            // promotes/blends active->current, so this alone doesn't pose the player (see notes).
             Object_ObjAnimSetMove(obj, move, progress, 0);
         }
         objRenderModel(obj);
