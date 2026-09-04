@@ -774,8 +774,12 @@ void updateCamera() {
     // Third-person follow of the spawned player character.
     if (gPlayerObj && getenv("STAIRFAX_PLAYER")) {
         float cx = padGetCX(0)/100.0f, cy = padGetCY(0)/100.0f;
+        if (fabsf(cx) < 0.2f) cx = 0.0f;   // C-stick deadzone: idle drift was accumulating pitch/yaw
+        if (fabsf(cy) < 0.2f) cy = 0.0f;   // to the clamp, pinning the camera looking at the sky
         gFollowYaw   += cx * 0.045f;
         gFollowPitch += cy * 0.03f;
+        if (getenv("STAIRFAX_CAM_TRACE")) { static int c=0; if((c++%60)==0)
+            fprintf(stderr,"[cam] pitch=%.3f yaw=%.3f cx=%.2f cy=%.2f\n", gFollowPitch, gFollowYaw, cx, cy); }
         if (gFollowPitch >  0.55f) gFollowPitch =  0.55f;
         if (gFollowPitch < -0.90f) gFollowPitch = -0.90f;
         float dist  = getenv("STAIRFAX_PLAYER_CAMDIST") ? (float)atof(getenv("STAIRFAX_PLAYER_CAMDIST")) : 340.0f;
@@ -787,6 +791,9 @@ void updateCamera() {
         float viewFwd[3]={ -sy*cp, sp, cyw*cp };
         for (int k=0;k<3;++k) gCamPos[k]=tgt[k]-viewFwd[k]*dist;
         gCamYaw=gFollowYaw; gCamPitch=gFollowPitch; gCamPlaced=true;
+        if (getenv("STAIRFAX_CAM_TRACE")) { static int c=0; if((c++%60)==0)
+            fprintf(stderr,"[cam] player=(%.1f,%.1f,%.1f) lookH=%.1f dist=%.1f pitch=%.3f camPos=(%.1f,%.1f,%.1f)\n",
+                    px,py,pz,lookH,dist,gFollowPitch, gCamPos[0],gCamPos[1],gCamPos[2]); }
         return;
     }
     if (!gCamPlaced) {
@@ -1113,6 +1120,10 @@ extern "C" void sceneRender(int a, int b, int c, int d, int e, int f) {
         int move = gPlayerMoving ? walkMove : idleMove;
         float speed = getenv("STAIRFAX_ANIM_SPEED") ? (float)atof(getenv("STAIRFAX_ANIM_SPEED")) : 0.3f;
         float progress = fmodf(gFrameCounter * speed * 0.03f, 1.0f);
+        if (getenv("STAIRFAX_CAM_TRACE")) { static int c=0; if((c++%60)==0) { uint8_t* o=gPlayerObj;
+            fprintf(stderr,"[render] local=(%.1f,%.1f,%.1f) world=(%.1f,%.1f,%.1f) rotX=%d\n",
+                *(float*)(o+0x0C),*(float*)(o+0x10),*(float*)(o+0x14),
+                *(float*)(o+0x18),*(float*)(o+0x1C),*(float*)(o+0x20), *(short*)(o+0x00)); } }
         stairfax_render_player(gPlayerObj, move, progress);
     }
     else if (gPlayerObj) {

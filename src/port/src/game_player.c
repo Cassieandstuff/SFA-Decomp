@@ -117,9 +117,14 @@ void stairfax_player_dll_tick(void) {
         unsigned char* o = gPlayerObj;
         if (*(float*)(o + 0x10) < gStairfaxGroundY) {
             *(float*)(o + 0x10) = gStairfaxGroundY;   // localPosY
-            *(float*)(o + 0x1C) = gStairfaxGroundY;   // worldPosY
             if (*(float*)(o + 0x28) < 0.0f) *(float*)(o + 0x28) = 0.0f;   // velocityY: stop falling
         }
+        // Sync worldPos from localPos: the render path draws at worldPos (0x18), but the port's
+        // spawn/update never syncs it (X/Z stay 0), so she renders at the world origin ~2000u away
+        // (tiny, off to the side) while the camera targets localPos. Parentless -> world = local.
+        *(float*)(o + 0x18) = *(float*)(o + 0x0C);   // worldPosX = localPosX
+        *(float*)(o + 0x1C) = *(float*)(o + 0x10);   // worldPosY = localPosY
+        *(float*)(o + 0x20) = *(float*)(o + 0x14);   // worldPosZ = localPosZ
     }
 
     if (getenv("STAIRFAX_PLAYER_DLL_TRACE")) {
