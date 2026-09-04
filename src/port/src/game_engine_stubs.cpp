@@ -14,12 +14,18 @@
 
 extern "C" GXRenderModeObj GXNtsc480IntDf = {};
 static int gTrace = 0;
-static void gEngineNoop(void) {}
+// Stub interface method: MUST return 0 (not void). A void stub leaves EAX undefined, so a game
+// call like `obj = (*gCameraInterface)->getFocusTarget()` reads garbage and then null-checks pass
+// on junk -> deref crash. Returning 0 makes every stubbed interface method yield NULL/0, so the
+// game's own `if (x != NULL)` guards take the safe path. (cdecl: caller cleans args, we ignore them.)
+static int gEngineNoop(void) { return 0; }
 extern "C" { void* gEngineStubVtbl[256]; }
 static void* gEngineStubVtblPtr = gEngineStubVtbl;  // one "interface" = &this
-// Crash diagnostics: print the exception code + faulting address (module-relative) so a
-// silent access violation in recompiled game code can be located via the .map/objdump.
-static LONG WINAPI stairfaxCrashFilter(EXCEPTION_POINTERS* ep) {
+// Crash diagnostics: print the exception code + faulting address (module-relative) plus a
+// module-relative backtrace so a silent access violation OR stack overflow in recompiled game
+// code can be located via the .map/objdump. A vectored handler (with a reserved stack, below)
+// catches stack overflow too, whose module+offset frames repeat = the recursion cycle.
+static void stairfaxPrintCrash(EXCEPTION_POINTERS* ep) {
     void* pc = (void*)ep->ExceptionRecord->ExceptionAddress;
     HMODULE mod = GetModuleHandleW(NULL);
     fprintf(stderr, "\n[CRASH] code=0x%08lX at %p (module base %p, +0x%tX)\n",
@@ -29,13 +35,29 @@ static LONG WINAPI stairfaxCrashFilter(EXCEPTION_POINTERS* ep) {
         fprintf(stderr, "[CRASH] access %s addr %p\n",
                 ep->ExceptionRecord->ExceptionInformation[0] ? "WRITE" : "READ",
                 (void*)ep->ExceptionRecord->ExceptionInformation[1]);
+    void* frames[48];
+    USHORT n = CaptureStackBackTrace(0, 48, frames, NULL);
+    for (USHORT i = 0; i < n; ++i)
+        fprintf(stderr, "[CRASH]   #%02u +0x%tX\n", i, (char*)frames[i] - (char*)mod);
     fflush(stderr);
+}
+static LONG WINAPI stairfaxCrashFilter(EXCEPTION_POINTERS* ep) {
+    stairfaxPrintCrash(ep);
     return EXCEPTION_EXECUTE_HANDLER;
+}
+// Vectored handler: catches stack overflow (which the unhandled-exception filter cannot, having
+// no stack) once SetThreadStackGuarantee reserves slack. Only acts on fatal codes, else passes.
+static LONG WINAPI stairfaxVectoredHandler(EXCEPTION_POINTERS* ep) {
+    DWORD c = ep->ExceptionRecord->ExceptionCode;
+    if (c == EXCEPTION_STACK_OVERFLOW) { stairfaxPrintCrash(ep); TerminateProcess(GetCurrentProcess(), 3); }
+    return EXCEPTION_CONTINUE_SEARCH;
 }
 struct EngineVtblInit {
     EngineVtblInit(){
         setbuf(stdout, 0); setbuf(stderr, 0);
         SetUnhandledExceptionFilter(stairfaxCrashFilter);
+        { ULONG g = 65536; SetThreadStackGuarantee(&g); }   // slack so the SO handler can run
+        AddVectoredExceptionHandler(0, stairfaxVectoredHandler);
         gTrace = getenv("STAIRFAX_TRACE") ? 1 : 0;
         for(int i=0;i<256;++i) gEngineStubVtbl[i]=(void*)gEngineNoop;
         GXNtsc480IntDf.fbWidth=640; GXNtsc480IntDf.efbHeight=480; GXNtsc480IntDf.xfbHeight=480;
@@ -177,7 +199,7 @@ int mapUnload(){ trace("mapUnload"); return 0; }
 int mapUpdateCameraPosByTransformSpace(){ trace("mapUpdateCameraPosByTransformSpace"); return 0; }
 int newshadows_initProceduralTextures(){ trace("newshadows_initProceduralTextures"); return 0; }
 int objRenderModelAndHitVolumes(){ trace("objRenderModelAndHitVolumes"); return 0; }
-int playerInitFuncPtrsEntry(){ trace("playerInitFuncPtrsEntry"); return 0; }
+// playerInitFuncPtrsEntry now provided by the real player DLL (player.c) - stub removed (Phase A).
 int resetSomeGxFlags(){ trace("resetSomeGxFlags"); return 0; }
 int runLoadingScreens(){ trace("runLoadingScreens"); return 0; }
 int setDrawCloudsAndLights(){ trace("setDrawCloudsAndLights"); return 0; }

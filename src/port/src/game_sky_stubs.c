@@ -29,7 +29,19 @@ void* saveGameGetEnvState(void) { return gEnvState; }
 int   randomGetRange(void) { return 0; }
 
 // --- link-only (sky render/lighting paths, not exercised yet) ---------------
-int Camera_GetCurrent(void) { return 0; }
+// The real player DLL calls Camera_GetCurrent() first thing and dereferences cam->yaw/pos/etc.
+// (camera-relative controls, focus math). A null return crashes it, so hand back a valid, zeroed
+// Camera (0x80 bytes covers the 0x60 struct + slack). Zeroed = yaw 0, origin - a safe default;
+// Phase B will populate it from the port's live follow-camera so controls track what's rendered.
+static unsigned char gStubCamera[0x80];
+void* Camera_GetCurrent(void) {
+    // scale (0x8) and fovY (0x18) must be non-zero: the player divides by them in its camera-relative
+    // math, so leaving them 0 makes the character's position go NaN. Sane defaults until Phase B
+    // feeds the real port camera.
+    static int init = 0;
+    if (!init) { init = 1; *(float*)(gStubCamera + 0x08) = 1.0f; *(float*)(gStubCamera + 0x18) = 1.0f; }
+    return gStubCamera;
+}
 int Camera_GetFarPlane(void) { return 0; }
 int Camera_GetFovY(void) { return 0; }
 int Camera_GetInverseViewMatrix(void) { return 0; }

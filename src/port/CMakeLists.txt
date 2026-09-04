@@ -252,6 +252,10 @@ add_executable(game_engine EXCLUDE_FROM_ALL
     src/game_objanim_stubs.c
     src/game_objprint_stubs.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/engine/5/5.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/engine/15/15.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/objects/195_Player/player.c
+    src/game_player.c
+    src/game_player_stubs.c
     src/game_engine_stubs.cpp)
 target_include_directories(game_engine PRIVATE ${GAME_INCLUDES})
 target_compile_definitions(game_engine PRIVATE ${GAME_DEFS})

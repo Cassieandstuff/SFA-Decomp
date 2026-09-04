@@ -340,7 +340,12 @@ static inline int staffCanContinueSpin(void* state)
     return 0;
 }
 
-int lbl_80332EC0[5] = {0x1D, 0x1E, 0x1F, 0x20, 0x21};
+/* Retail data table at 0x80332EC0 (.data spans to 0x80334EE8, ~0x2028 bytes): the player's
+ * move-slot table, param curves, anim-id lists and weapon-DA key table, all addressed as
+ * base+offset up to ~base+0x1bb0 (objLoadPlayerFromSave WRITES weapon-DA pointers into
+ * base+0x854..). The decomp has only recovered the first 5 ints; sized to the full span here
+ * (zero-filled beyond the known values) so those in-bounds - real bytes are a data-recovery TODO. */
+int lbl_80332EC0[0x80A] = {0x1D, 0x1E, 0x1F, 0x20, 0x21};
 GameObject* gPlayerSpawnedObjects[7] = {NULL};
 
 s16 lbl_80332EF0[30] = {

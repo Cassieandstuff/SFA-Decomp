@@ -6,6 +6,8 @@
 // (bare-symbol linkage) to avoid signature conflicts, like game_boot_stubs.c.
 
 
+#include <stdlib.h>   // calloc (ObjHits_AllocObjectState state buffer)
+
 // data globals object.c reads (player/map offsets)
 float gMapSavedPlayerOffsetX;
 float gMapSavedPlayerOffsetZ;
@@ -25,7 +27,17 @@ int ObjHitReact_InitState(int romDefNo, void* bank, void* state, int cursor, voi
 int ObjHitReact_ResetActiveObjects(void) { return 0; }
 int ObjHitReact_UpdateResetObjects(void) { return 0; }
 int ObjHitbox_AllocRotatedBounds(void* obj, int cursor) { (void)obj; return cursor; }
-int ObjHits_AllocObjectState(void* obj, int cursor) { (void)obj; return cursor; }
+// The real ObjHits_AllocObjectState carves an ObjHitsPriorityState (~0xB8 bytes) from the
+// bump arena and stores it at obj->anim.hitReactState (GameObject+0x54). The real player's
+// playerRefreshCollisionState writes localPos/worldPos into it (offsets 0x10/0x1C), so a null
+// hitReactState faults. Give each object its own zeroed state buffer (the ObjHits collision
+// SYSTEM stays stubbed, so only the player's own writes land here) and keep the cursor
+// unchanged (existing contract for downstream sub-buffers).
+int ObjHits_AllocObjectState(void* obj, int cursor) {
+    void* st = calloc(1, 0xC0);
+    *(void**)((char*)obj + 0x54) = st;   // obj->anim.hitReactState
+    return cursor;
+}
 int ObjHits_InitWorkBuffers(void) { return 0; }
 int ObjHits_ResetWorkBuffers(void) { return 0; }
 int ObjHits_TickPriorityHitCooldowns(void) { return 0; }
@@ -60,14 +72,12 @@ int objGetObjectType(void) { return 0; }
 int objListAdd(void) { return 0; }
 int objListInit(void) { return 0; }
 int objList_remove(void) { return 0; }
-int objLoadPlayerFromSave(void) { return 0; }
+// objLoadPlayerFromSave now provided by the real player DLL (player.c) - stub removed (Phase A).
 int objModelNormalDiskRenderCb(void) { return 0; }
 int objModelProjectedIndirectRenderCb(void) { return 0; }
 int objTypeInit(void) { return 0; }
-int playerDoHitDetection(void) { return 0; }
-int playerFree(void) { return 0; }
-int playerUpdate(void) { return 0; }
-int playerUpdateWhileTimeStopped(void) { return 0; }
+// playerDoHitDetection/playerFree/playerUpdate/playerUpdateWhileTimeStopped are now provided
+// by the real player DLL (src/dlls/objects/195_Player/player.c); stubs removed (Phase A).
 // Also a loadCharacter allocation-cursor advancer (cursor = shadowInit(obj, cursor, 0)); shadows
 // aren't ported but the stub MUST return the cursor unchanged so later sub-buffers stay valid.
 int shadowInit(void* obj, int cursor, int flag) { (void)obj; (void)flag; return cursor; }

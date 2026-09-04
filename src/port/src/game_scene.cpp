@@ -84,7 +84,10 @@ float gCamPitch = 0.35f;
 bool  gCamPlaced = false;
 
 // playable character (interim, port-side controller; real player.c not compiled yet)
-uint8_t* gPlayerObj = nullptr;   // the spawned Sabre/Krystal GameObject
+extern "C" { uint8_t* gPlayerObj = nullptr; }   // the spawned Sabre/Krystal GameObject (C linkage: player DLL harness reads it)
+static int gSceneBaseObjCount = -1;   // gObjCount before the player DLL spawns children (render-loop cap)
+extern "C" int  stairfax_player_dll_enabled(void);   // game_player.c - real player DLL harness
+extern "C" void stairfax_player_dll_tick(void);
 float    gFollowYaw = 0.0f;      // third-person camera orbit yaw (C-stick)
 float    gFollowPitch = -0.28f;  // look slightly down at the character
 float    gPlayerAnimPhase = 0.0f;// walk-cycle phase, advanced by movement speed
@@ -576,7 +579,11 @@ static void renderModel(const DispModel& dm, const float camView[3][4],
             const uint8_t* de = dlTable + dlIdx*0x1c;
             const uint8_t* dl = *(const uint8_t* const*)(de + 0);  // de+0 relocated to a host ptr on load
             int dls = (int)mdlBE16(de + 4);                        // de+4 (u16 size) is leaf, still BE
-            if (!dl || dls <= 0) continue;
+            // Reject an implausible DL pointer/size: an object whose model DL table wasn't
+            // relocated (e.g. a child the player DLL spawned via a load path the port doesn't
+            // fully wire) yields a garbage, often mis-aligned pointer here. Relocated host DL
+            // pointers are >=4-byte aligned; skip anything else rather than fault in the decode.
+            if (!dl || dls <= 0 || dls > 0x80000 || ((uintptr_t)dl & 3)) continue;
 
             int posOff = pnmtx;
             int descStride = pnmtx + posSz + (nrmP?nrmSz:0) + (clrP?clrSz:0) + layerCount*texSz;
@@ -636,6 +643,15 @@ static void renderModel(const DispModel& dm, const float camView[3][4],
     gx_draw_setJointOffsets(nullptr, 0);
     gx_draw_setJointMatrices(nullptr, 0);
     gx_draw_setForceLayout(0, 0, 0);
+}
+
+// SEH-guarded wrapper: the interim renderModel autodetects vertex stride by scanning display
+// lists, and a spawned object whose model the port doesn't fully load/relocate (e.g. once the
+// player DLL shifts the heap and exposes a latent DL over-read) can fault mid-scan. Skip that
+// one object's draw instead of taking down the frame. POD-only scope so SEH needs no C++ unwind.
+static void safeRenderModel(const DispModel& dm, const float camView[3][4], const float (*am)[3][4]) {
+    __try { renderModel(dm, camView, am); }
+    __except (1 /* EXCEPTION_EXECUTE_HANDLER */) { }
 }
 
 void loadScene() {
@@ -899,6 +915,10 @@ extern "C" void sceneRender(int a, int b, int c, int d, int e, int f) {
                 sscanf(ppos, "%f,%f,%f", &px, &py, &pz);
             gPlayerObj = (uint8_t*)stairfax_spawn_player(seq, px, py, pz);
             gFollowYaw = 0.0f; gCamPlaced = false;
+            // Objects present before the player DLL runs. playerUpdate spawns children (staff,
+            // effects) into gObjList whose models the port doesn't fully load/relocate; the
+            // generic render loop must not draw those, so cap it at this base count.
+            gSceneBaseObjCount = gObjCount;
         }
         if (const char* mm = getenv("STAIRFAX_MODEL_TEST")) {
             extern void* ObjModel_Load(int id, int loadFlag, int* outSize);
@@ -926,7 +946,11 @@ extern "C" void sceneRender(int a, int b, int c, int d, int e, int f) {
     float skyB = stairfax_sky_tick();
     vi_set_clear_color(0.02f + skyB * 0.28f, 0.03f + skyB * 0.47f, 0.06f + skyB * 0.74f);
 
-    updatePlayer();   // move the character (camera-relative) before framing the camera on it
+    // Real player DLL (Phase A): run the recompiled playerUpdate state machine over the
+    // spawned character. When enabled it owns the character's motion/animation, so the
+    // interim hand-driven updatePlayer is skipped. Default stays the interim path.
+    if (stairfax_player_dll_enabled()) stairfax_player_dll_tick();
+    else                               updatePlayer();   // interim camera-relative move
     updateCamera();
 
     const int W=1280, H=720;
@@ -995,7 +1019,7 @@ extern "C" void sceneRender(int a, int b, int c, int d, int e, int f) {
     gx_draw_setAlphaMode(RHI_ALPHA_OPAQUE);   // don't leak terrain's last mode into models
 
     // Real object models loaded by the real ObjModel_Load, drawn via gx_draw.
-    for (auto& dm : gDispModels) renderModel(dm, camView);
+    for (auto& dm : gDispModels) safeRenderModel(dm, camView, nullptr);
 
     // Spawned romlist objects: draw each GameObject's model. STAIRFAX_SPAWN_GRID lays them
     // out compactly near the camera (visible together); otherwise at their world positions.
@@ -1004,7 +1028,9 @@ extern "C" void sceneRender(int a, int b, int c, int d, int e, int f) {
         int grid = getenv("STAIRFAX_SPAWN_GRID") ? 1 : 0;
         int cols = 6, cell = 0;
         static int logged = 0;
-        for (int i = 0; i < gObjCount; ++i) {
+        int objDrawCount = (gSceneBaseObjCount >= 0 && gSceneBaseObjCount < gObjCount)
+                           ? gSceneBaseObjCount : gObjCount;   // skip player-DLL-spawned children
+        for (int i = 0; i < objDrawCount; ++i) {
             uint8_t* o = (uint8_t*)gObjList[i];
             if (o == gPlayerObj) continue;   // player rendered separately (dedicated harness)
             void* om = Obj_GetActiveModel(o);
@@ -1066,11 +1092,11 @@ extern "C" void sceneRender(int a, int b, int c, int d, int e, int f) {
                     Object_ObjAnimSetMove(H.objAnim, moveIdx, progress, 0);
                     *(uint16_t*)(H.state + 0x58) = 0;   // eventCountdown -> single slot
                     modelAnimEvalChannels((uint8_t*)H.dst, H.objModel, H.state, progress, 0x7f);
-                    renderModel(dm, camView, H.dst);
+                    safeRenderModel(dm, camView, H.dst);
                     animated = true;
                 }
             }
-            if (!animated) renderModel(dm, camView);
+            if (!animated) safeRenderModel(dm, camView, nullptr);
         }
         logged = 1;
     }

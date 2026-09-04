@@ -41,7 +41,13 @@ unsigned short gResourceRefCounts[RESOURCE_DESCRIPTOR_COUNT];
 
 // One shared stub descriptor: NULL acquire/release + a wide table of no-op methods
 // (wider than the largest real interface). Serves every id not yet brought up.
-static void resource_noop(void) {}
+// Stub resource-interface method: MUST return 0, not void. gXInterface globals are reassigned at
+// runtime to Resource_Acquire() results, so an un-brought-up DLL's methods dispatch HERE (not the
+// game_engine_stubs vtable). A void stub leaves EAX garbage, so a game call like
+// `obj = (*gCameraInterface)->getFocusTarget()` reads junk and its null-check passes on garbage ->
+// deref crash. Returning 0 makes every stubbed method yield NULL/0 so the game's guards take the
+// safe path. (cdecl: caller cleans args; we ignore them.)
+static int resource_noop(void) { return 0; }
 static struct StubDesc {
     unsigned int metadata[4];
     void (*acquire)(RD*);
@@ -56,11 +62,13 @@ static struct StubDesc {
 typedef struct { int id; RD* desc; } DllReg;
 
 // Real engine DLLs compiled into game_engine and registered by id (folder number).
-extern char sky_funcs[];   // src/dlls/engine/5/5.c - SkyDllInterface (id 5)
+extern char sky_funcs[];      // src/dlls/engine/5/5.c  - SkyDllInterface (id 5)
+extern char player_funcs[];   // src/dlls/engine/15/15.c - PlayerDllInterface / gPlayerInterface (id 0xf)
 
 static const DllReg* dllRegList(int* count) {
     static DllReg regs[] = {
         { 5, (RD*)sky_funcs },
+        { 0xf, (RD*)player_funcs },
     };
     *count = (int)(sizeof(regs) / sizeof(regs[0]));
     return regs;
