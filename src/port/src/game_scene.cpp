@@ -792,14 +792,19 @@ void updateCamera() {
         float cx = padGetCX(0)/100.0f, cy = padGetCY(0)/100.0f;
         if (fabsf(cx) < 0.2f) cx = 0.0f;   // C-stick deadzone: idle drift was accumulating pitch/yaw
         if (fabsf(cy) < 0.2f) cy = 0.0f;   // to the clamp, pinning the camera looking at the sky
+        // Freeze orbit accumulation during the ~2.5s scene load: transient pad state while the map
+        // streams in was swinging the pitch off its (look-down) default, so the camera "moved up on
+        // its own" and framed the sky before the player was even visible.
+        static int camWarm = 0;
+        if (camWarm < 150) { camWarm++; cx = 0.0f; cy = 0.0f; }
         gFollowYaw   += cx * 0.045f;
         gFollowPitch += cy * 0.03f;
         if (getenv("STAIRFAX_CAM_TRACE")) { static int c=0; if((c++%60)==0)
             fprintf(stderr,"[cam] pitch=%.3f yaw=%.3f cx=%.2f cy=%.2f\n", gFollowPitch, gFollowYaw, cx, cy); }
         if (gFollowPitch >  0.55f) gFollowPitch =  0.55f;
         if (gFollowPitch < -0.90f) gFollowPitch = -0.90f;
-        float dist  = getenv("STAIRFAX_PLAYER_CAMDIST") ? (float)atof(getenv("STAIRFAX_PLAYER_CAMDIST")) : 340.0f;
-        float lookH = getenv("STAIRFAX_PLAYER_CAMHEIGHT") ? (float)atof(getenv("STAIRFAX_PLAYER_CAMHEIGHT")) : 55.0f;
+        float dist  = getenv("STAIRFAX_PLAYER_CAMDIST") ? (float)atof(getenv("STAIRFAX_PLAYER_CAMDIST")) : 120.0f;
+        float lookH = getenv("STAIRFAX_PLAYER_CAMHEIGHT") ? (float)atof(getenv("STAIRFAX_PLAYER_CAMHEIGHT")) : 16.0f;
         float px=*(float*)(gPlayerObj+0x0C), py=*(float*)(gPlayerObj+0x10), pz=*(float*)(gPlayerObj+0x14);
         float tgt[3]={px, py+lookH, pz};
         float cp=cosf(gFollowPitch), sp=sinf(gFollowPitch), sy=sinf(gFollowYaw), cyw=cosf(gFollowYaw);

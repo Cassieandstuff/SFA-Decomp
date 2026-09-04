@@ -55,6 +55,15 @@ static float  me_getTime(int id)         { (void)id; return 0.0f; }
 static void*  me_getCurCharState(void)   { return gCharStateBuf; }
 static uint8_t* me_getCurCharPos(void)   { return gSaveData; }
 static void*  me_getTrickyStats(void)    { return gTrickyStatsBuf; }
+// getCurChar returns which of the player's shared model banks is active - objLoadPlayerFromSave
+// feeds it straight into Obj_SetActiveModelIndex. playerSetDisguised confirms the layout: the
+// undisguised character is index 1, the SharpClaw disguise is index 2. Left as the me_noop stub it
+// returned a garbage register value (2 -> the SharpClaw model). Default to 1 (undisguised); allow an
+// env override so the real bank for a given character can be dialed in by observation.
+static uint8_t me_getCurChar(void) {
+    const char* e = getenv("STAIRFAX_PLAYER_CHARID");
+    return (uint8_t)(e ? atoi(e) : 1);
+}
 
 void* stairfax_mapevent_descriptor(void) {
     if (!gMeBuilt) {
@@ -69,6 +78,7 @@ void* stairfax_mapevent_descriptor(void) {
         gMeDesc.iface.getTime              = me_getTime;
         gMeDesc.iface.getCurCharacterState = me_getCurCharState;
         gMeDesc.iface.getCurCharPos        = me_getCurCharPos;
+        gMeDesc.iface.getCurChar           = me_getCurChar;
         gMeDesc.iface.getTrickyStats       = (TrickyStats*(*)(void))me_getTrickyStats;
     }
     return &gMeDesc;

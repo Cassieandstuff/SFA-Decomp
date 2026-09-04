@@ -76,7 +76,10 @@ int getSaveGameLoadStatus(void) { return 0; }
 int getScreenResolution(void) { return 0; }
 int gxSetOpaqueNoZWriteMode(void) { return 0; }
 int lightSetColor(void) { return 0; }
-int mathCosf(void) { return 0; }
+// mathCosf(radians): the game's cosine (arg in radians). Was an int return-0 stub - float-returning
+// stubbed as int -> garbage xmm0 -> the player's heading (velocityX/Z from mathCosf(yaw)) went NaN.
+extern float cosf(float);
+float mathCosf(float radians) { return cosf(radians); }
 int modelLightStruct_getWorldPosition(void) { return 0; }
 int modelLightStruct_selectObjectLights(void) { return 0; }
 int modelLightStruct_setDiffuseColor(void) { return 0; }

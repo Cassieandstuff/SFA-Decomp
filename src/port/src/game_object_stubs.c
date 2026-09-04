@@ -59,7 +59,11 @@ int getTabEntry(void) { return 0; }
 int intersectModLineBuild(void) { return 0; }
 int mapLoadForObject(void) { return 0; }
 int mapUnloadRomListPage(void) { return 0; }
-int mathSinf(void) { return 0; }
+// mathSinf(radians): the game's sine (arg already in radians, e.g. pi*angle/32768). It was an
+// int return-0 stub - a float-returning function stubbed as int leaves garbage in xmm0, so the
+// player's heading math (velocityX/Z = speed*mathSinf(yaw)) went NaN the first locomotion frame.
+extern float sinf(float);
+float mathSinf(float radians) { return sinf(radians); }
 int mtx44Transpose(void) { return 0; }
 int mtxRotateByVec3s(void) { return 0; }
 int newshadows_getSmallDiskTexture(void) { return 0; }

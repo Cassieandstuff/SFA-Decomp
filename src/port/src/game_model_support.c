@@ -23,6 +23,7 @@ extern void  loadAssetFileById(void* out, int fileId);
 extern void  bswapModelFileHeader(void* p);
 extern void  bswapModelRenderOps(void* p);
 extern double acos(double);   // avoid <math.h> so we don't hit ucrt's inline acosf
+extern float sinf(float), cosf(float);   // same reason: pull from the CRT without <math.h>
 
 // --- MODELS.tab / MODELS.bin -------------------------------------------------
 // TWO model tables: the ROOT-level MODELS.tab/bin is the GLOBAL table objects load their
@@ -154,6 +155,21 @@ void  PSMTXMultVecSR(const float* m, const float* in, float* out) {
     out[0]=m[0]*x+m[1]*y+m[2]*z;
     out[1]=m[4]*x+m[5]*y+m[6]*z;
     out[2]=m[8]*x+m[9]*y+m[10]*z;
+}
+// m = rotation of `rad` radians about principal axis ('x'/'y'/'z'). SETS m (matches dolphin
+// C_MTXRotRad). It was previously a no-op stub, which left the caller's Mtx as stack garbage -
+// PSMTXMultVecSR(garbage, vec) then NaN'd the player's motion/tail vectors -> NaN position.
+void  PSMTXRotRad(float* m, char axis, float rad) {
+    float s = sinf(rad), c = cosf(rad);
+    for (int i = 0; i < 12; ++i) m[i] = 0.0f;
+    switch (axis) {
+        case 'x': case 'X':
+            m[0]=1.0f; m[5]=c; m[6]=-s; m[9]=s; m[10]=c; break;
+        case 'y': case 'Y':
+            m[0]=c; m[2]=s; m[5]=1.0f; m[8]=-s; m[10]=c; break;
+        default: /* 'z' */
+            m[0]=c; m[1]=-s; m[4]=s; m[5]=c; m[10]=1.0f; break;
+    }
 }
 
 // --- OS fast casts (shadow OSFastCast.h declares these extern) --------------

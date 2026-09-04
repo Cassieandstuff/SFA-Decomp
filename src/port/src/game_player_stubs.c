@@ -59,7 +59,6 @@ int Obj_IsObjectAlive(void) { return 0; }
 int Obj_SetParent(void) { return 0; }
 int Obj_TransformLocalVectorToWorld(void) { return 0; }
 int Obj_TransformWorldVectorToLocal(void) { return 0; }
-int PSMTXRotRad(void) { return 0; }
 int Pause_ResetMenuFrameCounter(void) { return 0; }
 int RandomTimer_UpdateRangeTrigger(void) { return 0; }
 int Rcp_SetSpiritVisionEnabled(void) { return 0; }

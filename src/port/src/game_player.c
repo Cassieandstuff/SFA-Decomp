@@ -107,18 +107,20 @@ void stairfax_player_dll_tick(void) {
     if (tr) { static int q=0; if(q++<3){ fprintf(stderr,"[player-dll] calling playerUpdate\n"); fflush(stderr);} }
     playerUpdate(gPlayerObj);
 
-    // Hard-floor clamp (Phase C first pass): the character spawns airborne and her spawn state does
-    // only horizontal wall-sweeps, never a downward ground probe, so engine/15 gravity would drop her
-    // through the world. Until she's driven into a proper grounded state (or real per-triangle terrain
-    // collision is wired), hold her at/above the flat ground plane so she stands. localPosY@0x10,
-    // worldPosY@0x1C, velocityY@0x28.
+    // Ground-pin (Phase C interim): the real vertical motion is driven by engine/15's gravity via the
+    // gPlayerInterface motion call, which expects the real per-triangle ground contract that the
+    // port's flat-floor collision stub (trackGetHeight/trackGetNearestGroundOffset) doesn't satisfy -
+    // so the grounding loop never closes and verticalVel holds nonzero, floating her off the world.
+    // Until real terrain collision is wired, close the loop from the port side: hold her at the flat
+    // ground plane (spawn Y) and clear verticalVel, so she settles into a standing idle instead of
+    // drifting. localPosY@0x10, worldPosY@0x1C, velocityY@0x28.
     {
         extern float gStairfaxGroundY;
+        extern void  playerSetVerticalVel(void* obj, float v);
         unsigned char* o = gPlayerObj;
-        if (*(float*)(o + 0x10) < gStairfaxGroundY) {
-            *(float*)(o + 0x10) = gStairfaxGroundY;   // localPosY
-            if (*(float*)(o + 0x28) < 0.0f) *(float*)(o + 0x28) = 0.0f;   // velocityY: stop falling
-        }
+        *(float*)(o + 0x10) = gStairfaxGroundY;   // localPosY: pin to the ground plane
+        *(float*)(o + 0x28) = 0.0f;               // velocityY: not falling/rising
+        playerSetVerticalVel(gPlayerObj, 0.0f);   // clear inner->verticalVel -> exit the landing state
         // Sync worldPos from localPos: the render path draws at worldPos (0x18), but the port's
         // spawn/update never syncs it (X/Z stay 0), so she renders at the world origin ~2000u away
         // (tiny, off to the side) while the camera targets localPos. Parentless -> world = local.
