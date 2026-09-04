@@ -175,6 +175,13 @@ void GXLoadPosMtxImm(const f32 mtx[3][4], u32 id) {
     if (gRealSkin) {
         float* M = &gPosMtx[s][0][0]; int bad = 0;
         for (int k=0;k<12;++k){ float a = M[k]<0?-M[k]:M[k]; if (a>1e6f || a!=a){ bad=1; break; } }
+        // The skinned character is drawn under the follow-camera, which holds it ~120u away, so every
+        // legit player pos matrix has a small view-space translation (well under a few hundred u). A
+        // pos matrix whose bone sits ~2000u out is an extra vertex-group joint the not-yet-ported
+        // blend path left at the WORLD ORIGIN (view-space ~(-1600,1900,-1760)); its verts draw a
+        // degenerate triangle fan to that point - the diagonal spike. Clip those to the far plane.
+        if (!bad) { float tx=gPosMtx[s][0][3], ty=gPosMtx[s][1][3], tz=gPosMtx[s][2][3];
+            if (tx*tx + ty*ty + tz*tz > 900.0f*900.0f) bad = 1; }
         if (bad) { for (int k=0;k<12;++k) M[k]=0; gPosMtx[s][2][3]=1e9f; }
     }
 }

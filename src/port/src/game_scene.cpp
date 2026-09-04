@@ -803,8 +803,8 @@ void updateCamera() {
             fprintf(stderr,"[cam] pitch=%.3f yaw=%.3f cx=%.2f cy=%.2f\n", gFollowPitch, gFollowYaw, cx, cy); }
         if (gFollowPitch >  0.55f) gFollowPitch =  0.55f;
         if (gFollowPitch < -0.90f) gFollowPitch = -0.90f;
-        float dist  = getenv("STAIRFAX_PLAYER_CAMDIST") ? (float)atof(getenv("STAIRFAX_PLAYER_CAMDIST")) : 120.0f;
-        float lookH = getenv("STAIRFAX_PLAYER_CAMHEIGHT") ? (float)atof(getenv("STAIRFAX_PLAYER_CAMHEIGHT")) : 16.0f;
+        float dist  = getenv("STAIRFAX_PLAYER_CAMDIST") ? (float)atof(getenv("STAIRFAX_PLAYER_CAMDIST")) : 160.0f;
+        float lookH = getenv("STAIRFAX_PLAYER_CAMHEIGHT") ? (float)atof(getenv("STAIRFAX_PLAYER_CAMHEIGHT")) : 45.0f;
         float px=*(float*)(gPlayerObj+0x0C), py=*(float*)(gPlayerObj+0x10), pz=*(float*)(gPlayerObj+0x14);
         float tgt[3]={px, py+lookH, pz};
         float cp=cosf(gFollowPitch), sp=sinf(gFollowPitch), sy=sinf(gFollowYaw), cyw=cosf(gFollowYaw);
