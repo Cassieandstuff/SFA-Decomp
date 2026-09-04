@@ -407,6 +407,22 @@ extern "C" void modelAnimBuildJointMatrices(int* out, uint8_t* dst, void* work, 
         float t[12]; PSMTXConcat(P, M, t);
         for (int i = 0; i < 12; ++i) M[i] = t[i];
     }
+    // Stage 5: place the (model-space) skeleton into the world. dst is the object world matrix wm
+    // (Obj_BuildWorldTransformMatrix -> setMatrixFromObjectTransposed), passed as arg2 by the real
+    // modelAnimEvalChannels/ObjModel_UpdateAnimMatrices. Without this the bones stay at the model
+    // origin and the character renders ~2000u from the camera (tiny, off-screen). Prepend wm to each
+    // bone once: worldBone = wm * modelBone. (extra vtx-group slots inherit it via modelCalcVtxGroupMtxs.)
+    if (dst && (uint8_t*)dst != bank) {
+        unsigned char applied[MAX_JOINTS] = {0};
+        for (int j = 0; j < jc; ++j) {
+            int slot = jd[j * 0x1c + 1] & 0x7f;
+            if (slot >= MAX_JOINTS || applied[slot]) continue;
+            applied[slot] = 1;
+            float* M = (float*)(bank + slot * 0x40);
+            float t[12]; PSMTXConcat((float*)dst, M, t);
+            for (int i = 0; i < 12; ++i) M[i] = t[i];
+        }
+    }
     // The extra vertex-group joints (bank[jointCount..]) are filled by the real modelCalcVtxGroupMtxs
     // in modelInitMtxs after this returns (world * inverse-bind blends of two main joints); the bank
     // clear above leaves them identity until then.
