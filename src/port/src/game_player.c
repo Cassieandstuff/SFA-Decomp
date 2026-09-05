@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+extern float sinf(float), cosf(float);   // pull from CRT without <math.h> (project pattern)
 
 extern unsigned char* gPlayerObj;    // spawned Sabre/Krystal GameObject (game_scene.cpp)
 extern float timeDelta;              // per-frame time (frames); the port never set it -> 0 -> the
@@ -129,6 +130,29 @@ void stairfax_player_dll_tick(void) {
         *(float*)(o + 0x20) = *(float*)(o + 0x14);   // worldPosZ = localPosZ
     }
 
+    // Interim locomotion (Milestone 2): SFA's real walk SPEED comes from the walk MOVE's root motion
+    // (baddie.animSpeedA/B), which needs the animation move-system not yet ported - so the real
+    // playerUpdate computes the camera-relative heading (PlayerState.inputHeading @0x474, =
+    // getAngle(stick) - cameraYaw, where cameraYaw is the camera shim's yaw) but produces zero speed.
+    // Drive the character along that REAL heading at a fixed walk speed here while the move system is
+    // stubbed; this comes out once Milestone 3 lands. inputMagnitude @0x298.
+    {
+        unsigned char* st = *(unsigned char**)(gPlayerObj + 0xB8);   // PlayerState (obj->extra)
+        float imag = st ? *(float*)(st + 0x298) : 0.0f;
+        if (st && imag > 0.05f) {
+            short heading = *(short*)(st + 0x474);                   // camera-relative s16 heading
+            float rad = (float)heading * (2.0f * 3.14159265f / 65536.0f);
+            float speed = getenv("STAIRFAX_WALK_SPEED") ? (float)atof(getenv("STAIRFAX_WALK_SPEED")) : 6.0f;
+            float step = speed * (imag > 1.0f ? 1.0f : imag);
+            unsigned char* o = gPlayerObj;
+            *(float*)(o + 0x0C) += sinf(rad) * step;    // localPosX
+            *(float*)(o + 0x14) += -cosf(rad) * step;   // localPosZ (heading->world = (sin,-cos): flips fwd/back)
+            *(short*)(o + 0x00) = (short)(-heading);   // face movement dir (mesh yaw is opposite handedness)
+            *(float*)(o + 0x18) = *(float*)(o + 0x0C); // re-sync worldPos (render draws worldPos)
+            *(float*)(o + 0x20) = *(float*)(o + 0x14);
+        }
+    }
+
     if (getenv("STAIRFAX_PLAYER_DLL_TRACE")) {
         static int f = 0;
         if ((f++ % 60) == 0) {
@@ -141,9 +165,16 @@ void stairfax_player_dll_tick(void) {
             float vx=*(float*)(o+0x24), vy=*(float*)(o+0x28), vz=*(float*)(o+0x2C);
             short cmode = inner?*(short*)(inner+0x274):0, stateId = inner?*(short*)(inner+0x278):0;
             unsigned f0 = inner?*(unsigned*)(inner+0x25C):0;   // baddie.flags0 region (gravity gate)
-            fprintf(stderr, "[player-dll] f=%d local=(%.1f,%.1f,%.1f) vel=(%.2f,%.2f,%.2f) ctrlMode=%d stateId=%d flags360=0x%x\n",
-                    f, px, py, pz, vx, vy, vz, cmode, stateId, flags360);
-            (void)f0;
+            int stickY = inner?*(int*)(inner+0x6D4):0;          // set by playerDoControls from padGetStickY
+            // baddie motion chain (BaddieState @ PlayerState+0): moveInputZ->inputMagnitude->animSpeed->velocity
+            float mInZ = inner?*(float*)(inner+0x28C):0.0f, imag = inner?*(float*)(inner+0x298):0.0f;
+            float spA = inner?*(float*)(inner+0x280):0.0f, spB = inner?*(float*)(inner+0x284):0.0f;
+            float mSpeed = inner?*(float*)(inner+0x2A0):0.0f;
+            unsigned char curAnim = inner?*(unsigned char*)(inner+0x8C8):0, gait = inner?*(unsigned char*)(inner+0x8CA):0;
+            fprintf(stderr, "[player-dll] f=%d pos=(%.1f,%.1f,%.1f) yaw=%d imag=%.2f inHead=%d curAnim=0x%x\n",
+                    f, px, py, pz, yaw, imag, (int)(short)(inner?*(short*)(inner+0x474):0), curAnim);
+            (void)f0; (void)vx; (void)vy; (void)vz; (void)stateId; (void)flags360; (void)stickY;
+            (void)mInZ; (void)spA; (void)spB; (void)mSpeed; (void)gait; (void)cmode;
         }
     }
 }

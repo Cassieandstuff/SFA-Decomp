@@ -42,6 +42,21 @@ void* Camera_GetCurrent(void) {
     if (!init) { init = 1; *(float*)(gStubCamera + 0x08) = 1.0f; *(float*)(gStubCamera + 0x18) = 1.0f; }
     return gStubCamera;
 }
+
+// Interim camera shim (Milestone 2): game_scene pushes the port follow-cam pose here each frame so
+// the REAL playerUpdate - which reads Camera_GetCurrent()->yaw/pos for its camera-relative controls -
+// tracks the on-screen view instead of a fixed yaw 0. Field offsets per include/main/camera.h:
+// yaw@0x00 (s16), pitch@0x02 (s16), scale@0x08, pos x/y/z@0x0C/0x10/0x14, fovY@0x18. scale + fovY
+// keep their non-zero init defaults (the player divides by them). Replaced by the real
+// engine/1_camcontrol view camera once that DLL is brought up.
+void stairfax_camera_set_pose(short yaw, short pitch, float x, float y, float z) {
+    *(short*)(gStubCamera + 0x00) = yaw;
+    *(short*)(gStubCamera + 0x02) = pitch;
+    *(float*)(gStubCamera + 0x08) = 1.0f;   // scale (safety; player divides by it)
+    *(float*)(gStubCamera + 0x0C) = x;
+    *(float*)(gStubCamera + 0x10) = y;
+    *(float*)(gStubCamera + 0x14) = z;
+}
 int Camera_GetFarPlane(void) { return 0; }
 int Camera_GetFovY(void) { return 0; }
 int Camera_GetInverseViewMatrix(void) { return 0; }

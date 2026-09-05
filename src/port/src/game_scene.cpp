@@ -88,6 +88,7 @@ extern "C" { uint8_t* gPlayerObj = nullptr; }   // the spawned Sabre/Krystal Gam
 static int gSceneBaseObjCount = -1;   // gObjCount before the player DLL spawns children (render-loop cap)
 extern "C" int  stairfax_player_dll_enabled(void);   // game_player.c - real player DLL harness
 extern "C" void stairfax_player_dll_tick(void);
+extern "C" void stairfax_camera_set_pose(short yaw, short pitch, float x, float y, float z);  // camera shim
 float    gFollowYaw = 0.0f;      // third-person camera orbit yaw (C-stick)
 float    gFollowPitch = -0.28f;  // look slightly down at the character
 float    gPlayerAnimPhase = 0.0f;// walk-cycle phase, advanced by movement speed
@@ -993,6 +994,19 @@ extern "C" void sceneRender(int a, int b, int c, int d, int e, int f) {
     if (stairfax_player_dll_enabled()) stairfax_player_dll_tick();
     else                               updatePlayer();   // interim camera-relative move
     updateCamera();
+
+    // Camera shim (Milestone 2): push the port follow-cam pose into the view struct the REAL
+    // playerUpdate reads (Camera_GetCurrent), so its camera-relative controls track the on-screen
+    // view. gFollowYaw/gFollowPitch are the port's orbit angles in RADIANS; the Camera struct wants
+    // GameCube s16 angles (full turn = 65536). gCamPos is the world-space eye position.
+    if (stairfax_player_dll_enabled() && gPlayerObj) {
+        short camYawS16, camPitchS16;
+        float k = 65536.0f / (2.0f * 3.14159265f);
+
+        camYawS16 = (short)(-gFollowYaw * k);   // positive sign = first guess; correct empirically
+        camPitchS16 = 0;
+        stairfax_camera_set_pose(camYawS16, camPitchS16, gCamPos[0], gCamPos[1], gCamPos[2]);
+    }
 
     const int W=1280, H=720;
     float proj[4][4]; memset(proj,0,sizeof proj);

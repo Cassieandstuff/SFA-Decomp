@@ -299,8 +299,10 @@ uint32_t getButtonsJustPressed(int port)     { return (port > 0 || sJoypadDisabl
 uint32_t getButtonsJustPressedIfNotBusy(int port) { if (port > 0) return 0; if (sJoypadDisabled) return 0xFFFFFFFFu; return sReleased[port] & sMask[port]; }
 uint32_t getNewInputs(int port)              { return port > 0 ? 0 : sHeld[port]; }
 
-int  padGetStickX(int port) { return (port > 0 || sJoypadDisabled) ? 0 : sStickX[port]; }
-int  padGetStickY(int port) { return (port > 0 || sJoypadDisabled) ? 0 : sStickY[port]; }
+int  padGetStickX(int port) { const char* f; if (port==0 && (f=getenv("STAIRFAX_FORCE_STICKX"))) return atoi(f);
+                              return (port > 0 || sJoypadDisabled) ? 0 : sStickX[port]; }
+int  padGetStickY(int port) { const char* f; if (port==0 && (f=getenv("STAIRFAX_FORCE_STICKY"))) return atoi(f);
+                              return (port > 0 || sJoypadDisabled) ? 0 : sStickY[port]; }
 int  padGetCX(int port)     { return (port > 0 || sJoypadDisabled) ? 0 : sSubX[port]; }
 int  padGetCY(int port)     { return (port > 0 || sJoypadDisabled) ? 0 : sSubY[port]; }
 unsigned char padGetLTrigger(int port) { return sJoypadDisabled ? 0 : sTrigL[port]; }
