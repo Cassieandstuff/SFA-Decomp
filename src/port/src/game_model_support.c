@@ -72,6 +72,13 @@ void stairfax_model_perdir(int on) { gUsePerDir = on; }
 //   ANIM.BIN   (0x30) raw anim records (NOT ZLB; size via consecutive ANIM.TAB deltas)
 static unsigned char* gAnimTab; static int gAnimTabSize;   // per-dir ANIM.TAB, u32-swapped
 static unsigned char* gAnimBin; static int gAnimBinSize;   // per-dir ANIM.BIN, raw
+// PREANIM (resident pre-loaded anim set): the player's real animations live here, NOT in ANIM.BIN.
+// animLoadFromTable (model.c:2138) reads PREANIM.TAB[id]; if & 0x10000000, the record is in
+// PREANIM.BIN at (word & 0x0fffffff) and ANIM.BIN's 0x20 entry is just a "look in PREANIM" stub.
+// PREANIM.TAB/BIN are ROOT-level. TAB registered as fileId 0x52 (fileLoadToBufferOffset serves it);
+// BIN (0x51) served raw by loadAndDecompressDataFile below (size via consecutive PREANIM.TAB deltas).
+static unsigned char* gPreTab; static int gPreTabSize;     // PREANIM.TAB, u32-swapped
+static unsigned char* gPreBin; static int gPreBinSize;     // PREANIM.BIN, raw
 static int gAnimRegistered;
 
 // model.c global: anim id -> ANIM.BIN offset. Normally set by ObjModel_InitResourceCaches,
@@ -97,6 +104,19 @@ static void animFilesEnsureLoaded(const char* dir) {
     }
     snprintf(p, sizeof p, "%s/ANIM.BIN", dir);
     gAnimBin = (unsigned char*)loadFileByPath(p, &gAnimBinSize, 0);
+    // PREANIM (root-level): where the player's real animations live.
+    if ((gPreTab = (unsigned char*)loadFileByPath("PREANIM.TAB", &gPreTabSize, 0))) {
+        beFixArray32(gPreTab, gPreTabSize/4);
+        dvd_register_buffer(0x52, gPreTab, gPreTabSize);
+    }
+    gPreBin = (unsigned char*)loadFileByPath("PREANIM.BIN", &gPreBinSize, 0);
+}
+// Size of PREANIM id `idx` = delta of consecutive (host-order) PREANIM.TAB offsets.
+static unsigned preanimEntrySize(int idx) {
+    if (!gPreTab || idx < 0 || (idx + 2) * 4 > gPreTabSize) return 0x1000;
+    unsigned a = ((unsigned*)gPreTab)[idx]     & 0x0fffffff;
+    unsigned b = ((unsigned*)gPreTab)[idx + 1] & 0x0fffffff;
+    return (b > a && b - a < 0x40000) ? (b - a) : 0x1000;
 }
 
 static void modelsEnsureLoaded(void) {
@@ -417,6 +437,28 @@ void* loadAndDecompressDataFile(int fileId, void* dst, int offsetFlags, unsigned
         if (off >= (unsigned)gAnimBinSize) return dst;
         if (off + n > (unsigned)gAnimBinSize) n = (unsigned)gAnimBinSize - off;
         memcpy(dst, gAnimBin + off, n);
+        return dst;
+    }
+
+    if (fileId == 0x51) {                             // PREANIM.BIN (resident, raw) - real player anims
+        if (flags & 1) { if (sizeOut) *sizeOut = (int)preanimEntrySize(idx); return dst; }
+        if (!gPreBin || !dst) return dst;
+        unsigned n = length;
+        if (off >= (unsigned)gPreBinSize) return dst;
+        if (off + n > (unsigned)gPreBinSize) n = (unsigned)gPreBinSize - off;
+        memcpy(dst, gPreBin + off, n);
+        // The PREANIM record is big-endian on disc. Unlike the per-area moveData (swapped once by
+        // stairfax_bswap_model_moves at spawn), cached moves load lazily down this path and are never
+        // swapped - so the decoder read BE rotation descriptors as host order -> collapsed/spinning
+        // joints. Swap the fields it reads natively: streamOff@2, rootCurveOffset@4, and the u16
+        // frame-command descriptors [10..streamOff). The packed delta STREAM stays BE (read MSB-first).
+        if (n > 10) {
+            unsigned char* a = (unsigned char*)dst;
+            unsigned streamOff = beRead16(a + 2);
+            beFix16(a + 2); beFix16(a + 4);
+            if (streamOff > 10 && streamOff < 0x8000 && (unsigned)streamOff <= n)
+                beFixArray16(a + 10, (streamOff - 10) / 2);
+        }
         return dst;
     }
 
