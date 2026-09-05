@@ -105,6 +105,14 @@ void stairfax_player_dll_tick(void) {
     // never sets these (they stay 0), and the player's motion integration divides by them -> NaN.
     timeDelta = 1.0f; framesThisStep = 1; framesThisStepUnclamped = 1;
 
+    // No water in this scene: the real per-frame water-volume query that fills baddie.waterSurfaceY
+    // (BaddieState @ PlayerState+0x1C0) isn't ported, so the zeroed field reads as "water surface at
+    // Y=0". The ground-pin holds worldPosY far below 0, so waterDepth = 0 - worldPosY is large and
+    // playerIsInWater() -> true -> the swim animation. Write the engine's no-water sentinel (-1e5) so
+    // playerUpdateSurfaceResponse resolves waterDepth to not-submerged. Removed once real water
+    // collision is wired.
+    { unsigned char* st = *(unsigned char**)(gPlayerObj + 0xB8); if (st) *(float*)(st + 0x1C0) = -100000.0f; }
+
     if (tr) { static int q=0; if(q++<3){ fprintf(stderr,"[player-dll] calling playerUpdate\n"); fflush(stderr);} }
     playerUpdate(gPlayerObj);
 
