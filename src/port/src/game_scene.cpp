@@ -277,6 +277,63 @@ static void decodeAtlas(uint8_t* a, float frameF, int moveIdx,
                 di, nDesc, dbgAnim, dbgMin*57.2958f, dbgMax*57.2958f); }}
 }
 
+// Reversed modelRenderInterpolateRootTransform (render.c:407) - the ROOT-MOTION decode, the keystone
+// that lets a move's root track drive real displacement (move distance / warp / height cues consumed
+// by ObjModel_SampleJointTransform + player.c). Same interpolated-bitstream machine as decodeAtlas,
+// pointed at the move's root slot: 3 channels, each a PRIMARY descriptor (base<<4|bitWidth) whose
+// interpolated value -> outRotation[i] (14-bit sign-extended delta, x4), and, gated by the primary's
+// 0x10 flag, a terminal SECONDARY/tertiary in the 0x10/0x20 chain -> outPosition[i] (natural signed
+// delta, x1). bitWidth 0 -> 0 (retail sample-init; NOT base, unlike the joint path). The caller
+// (model.c ObjModel_SampleJointTransform, compiled) set anim->frameStreamCursor/Stride/framePhase and
+// swapped moveFrameData to the root slot; it post-scales outPos by 1/512 + root bind head * scale.
+// GC packed-memory helpers become plain reads here: descriptors are host-swapped at load, the two
+// parallel frame streams are read MSB-first big-endian via animReadBits. ObjAnimState offsets:
+// framePhase@0x04, frameStreamCursor@0x2C, moveFrameData@0x34, frameStreamStride@0x4E.
+extern "C" void modelRenderInterpolateRootTransform(void* animv, int16_t* outPosition, int16_t* outRotation) {
+    uint8_t* anim = (uint8_t*)animv;
+    for (int i = 0; i < 3; ++i) { outPosition[i] = 0; outRotation[i] = 0; }
+    if (!anim) return;
+    float framePhase = *(float*)(anim + 0x04);
+    int16_t stride   = *(int16_t*)(anim + 0x4E);
+    const uint8_t* cur = *(const uint8_t**)(anim + 0x2C);
+    uint8_t* mfd       = *(uint8_t**)(anim + 0x34);
+    if (!cur || !mfd) return;
+    const uint16_t* desc = (const uint16_t*)(mfd + 4);           // = atlas+10, the descriptor table
+    int streamOff = *(uint16_t*)(mfd - 4);                        // atlas+2 (host-swapped)
+    int nDesc = (streamOff > 10) ? (streamOff - 10) / 2 : 0;
+    const uint8_t* next = cur + stride;
+    float fp = framePhase - floorf(framePhase);
+    int fracFixed = (int)(fp * 16384.0f);
+    int bitPos = 0, di = 0;
+    // Decode one descriptor. bitWidth 0 -> 0. Else read bitWidth bits from the current+next frame
+    // streams (MSB-first) and interpolate by the subframe fraction; sext = 14-bit sign-extend of the
+    // delta (rotation), else natural signed (position); scale = channel weight (rotation x4, pos x1).
+    auto readCh = [&](int scale, int sext) -> int {
+        if (di >= nDesc) { ++di; return 0; }
+        unsigned d = desc[di++];
+        int bw = d & 0xf;
+        if (bw == 0) return 0;
+        int cv = (int)animReadBits(cur,  bitPos, bw);
+        int nv = (int)animReadBits(next, bitPos, bw);
+        bitPos += bw;
+        int delta = nv - cv;
+        if (sext) delta = (int)((unsigned)delta << 18) >> 18;   // 14-bit sign-extend
+        int interp = cv + ((delta * fracFixed) >> 14);
+        return (int)(int16_t)(d & 0xfff0) + interp * scale;
+    };
+    for (int i = 0; i < 3; ++i) {
+        unsigned d = (di < nDesc) ? desc[di] : 0;
+        outRotation[i] = (int16_t)readCh(4, 1);                  // primary -> rotation
+        int pos = 0;
+        if (d & 0x10) {
+            unsigned d1 = (di < nDesc) ? desc[di] : 0;
+            int s1 = readCh(1, 0);                               // secondary
+            pos = (d1 & 0x20) ? readCh(1, 0) : s1;               // tertiary is terminal, else secondary
+        }
+        outPosition[i] = (int16_t)pos;
+    }
+}
+
 // The reversed modelAnimBuildJointMatrices, with the REAL retail signature, so the real eval
 // chain (modelAnimEvalChannels -> modelAnimUpdateChannels -> here, all in model.c) drives it.
 // Reads the ObjAnimState `work`: moveFrameData@0x34 (= atlas+6), framePhase@0x04. Produces the

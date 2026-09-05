@@ -543,8 +543,8 @@ extern void* loadAnimation(void* hdr, short id, int moveIndex, unsigned char* bu
 void animationLoad(void** out, int animId, int moveIndex, unsigned char* cache, void* animDef) {
     if (out) *out = loadAnimation(animDef, (short)animId, moveIndex, cache);
 }
-// modelAnimBuildJointMatrices is now the reversed real implementation in game_scene.cpp.
-void  modelRenderInterpolateRootTransform(void) { }
+// modelAnimBuildJointMatrices + modelRenderInterpolateRootTransform are now the reversed real
+// implementations in game_scene.cpp.
 void  modelRenderDecodeAdpcm(void) { }
 // Real render-instruction bitstream state (from modelEngine.c, which the port can't compile).
 // The interpreter (objprint_dolphin.c) needs this to actually initialise the bit cursor.
