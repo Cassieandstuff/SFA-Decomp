@@ -458,6 +458,18 @@ void* loadAndDecompressDataFile(int fileId, void* dst, int offsetFlags, unsigned
             beFix16(a + 2); beFix16(a + 4);
             if (streamOff > 10 && streamOff < 0x8000 && (unsigned)streamOff <= n)
                 beFixArray16(a + 10, (streamOff - 10) / 2);
+            // Root curve (ObjAnimMoveData.rootCurveOffset @+4, now host order): a run/blend move's
+            // speed->phase curve, at moveData + rootCurveOffset, which sits PAST the frame stream so
+            // the descriptor swap above never reaches it. Layout: f32 scale, s16 sampleCount, then s16
+            // axis samples (to end of record). Left BE, ObjAnim_SampleRootCurvePhase reads a
+            // non-monotonic distance curve and its do/while(!foundPhase) (objanim.c:645) SPINS - the
+            // gait-8 sprint hang. Swap it here so the curve is a valid ascending distance table.
+            int rco = *(short*)(a + 4);
+            if (rco >= (int)streamOff && rco + 6 <= (int)n) {
+                beFix32(a + rco);                                   // f32 scale
+                beFix16(a + rco + 4);                               // s16 sampleCount
+                beFixArray16(a + rco + 6, (n - (rco + 6)) / 2);     // s16 axis samples
+            }
         }
         return dst;
     }
