@@ -101,9 +101,25 @@ void stairfax_player_dll_tick(void) {
         }
     }
 
-    // SFA measures time in FRAMES: a normal frame is timeDelta=1.0, framesThisStep=1. The port
-    // never sets these (they stay 0), and the player's motion integration divides by them -> NaN.
-    timeDelta = 1.0f; framesThisStep = 1; framesThisStepUnclamped = 1;
+    // Frame-rate independence: SFA is a variable-timestep engine. waitNextFrame() (runs each frame in
+    // gameLoop, BEFORE this harness) already computes the real per-frame timeDelta from wall-clock
+    // elapsed (60Hz quantum: timeDelta=1.0 == one 60Hz frame, clamped to 6.0), so we consume it here
+    // instead of the old fixed 1.0 override - the player now runs at correct real-world speed at any
+    // render rate (verified dt-invariant: steady-state speed matches across timeDelta 0.5/1.0/2.0).
+    // Fallbacks: timeDelta<=0 (paused / pre-timing first frame) floors to a single 60Hz frame.
+    // Diagnostics: STAIRFAX_DT_TRACE logs the incoming value; STAIRFAX_FORCE_DT pins timeDelta (the
+    // dt-invariance test harness); STAIRFAX_LOCKDT restores the old fixed 1.0 (A/B).
+    if (getenv("STAIRFAX_DT_TRACE")) { static int n=0; if(n++<40)
+        fprintf(stderr, "[dt] incoming timeDelta=%.4f fts=%d ftsU=%d\n", timeDelta, framesThisStep, framesThisStepUnclamped); }
+    { const char* fd = getenv("STAIRFAX_FORCE_DT");
+      if (fd) {
+        float d = (float)atof(fd); if (d <= 0.0f) d = 1.0f;
+        static float rem = 0.0f; rem += d; int fts = (int)rem; rem -= (float)fts;
+        timeDelta = d; framesThisStep = (unsigned char)(fts < 1 ? 1 : fts); framesThisStepUnclamped = (unsigned char)fts;
+      } else if (getenv("STAIRFAX_LOCKDT") || timeDelta <= 0.0f) {
+        timeDelta = 1.0f; framesThisStep = 1; framesThisStepUnclamped = 1;
+      }
+    }
 
     // No water in this scene: the real per-frame water-volume query that fills baddie.waterSurfaceY
     // (BaddieState @ PlayerState+0x1C0) isn't ported, so the zeroed field reads as "water surface at
