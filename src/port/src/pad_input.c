@@ -23,6 +23,7 @@
 #include <windows.h>
 #include <xinput.h>
 #include <string.h>
+extern float sqrtf(float);   // analog stick magnitude (radial deadzone), CRT without <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -111,6 +112,7 @@ static void sampleHost(PADStatus* s) {
     uint16_t b = 0;
     int lx = 0, ly = 0, cx = 0, cy = 0;
     int tl = 0, tr = 0;
+    int axa = 0, aya = 0, haveAnalog = 0;   // analog left-stick (XInput), scaled to GC range
 
     // keyboard
     if (keyDown('A')) lx -= 1;
@@ -152,16 +154,31 @@ static void sampleHost(PADStatus* s) {
             if (g & XINPUT_GAMEPAD_RIGHT_SHOULDER) b |= PAD_TRIGGER_Z;
             if (xs.Gamepad.bLeftTrigger  > 30) { b |= PAD_TRIGGER_L; if (xs.Gamepad.bLeftTrigger  > tl) tl = xs.Gamepad.bLeftTrigger; }
             if (xs.Gamepad.bRightTrigger > 30) { b |= PAD_TRIGGER_R; if (xs.Gamepad.bRightTrigger > tr) tr = xs.Gamepad.bRightTrigger; }
-            if (xs.Gamepad.sThumbLX >  8000) lx = 1; else if (xs.Gamepad.sThumbLX < -8000) lx = -1;
-            if (xs.Gamepad.sThumbLY >  8000) ly = 1; else if (xs.Gamepad.sThumbLY < -8000) ly = -1;
+            // Analog left stick -> GC range: preserve magnitude so gentle input walks and full input
+            // runs (the game clamps |input|>=56 to full). Radial deadzone; scale the throw past it to
+            // +-100 (matching the old digital "full"). Digitizing this to +-1 was the "always sprints"
+            // / "no walk" bug. Keyboard/dpad fall back to the digital +-1 (lx/ly) below.
+            {
+                int lxr = xs.Gamepad.sThumbLX, lyr = xs.Gamepad.sThumbLY;
+                const int DZ = 7849;                 // XInput left-stick deadzone
+                float mag = sqrtf((float)lxr*lxr + (float)lyr*lyr);
+                if (mag > (float)DZ) {
+                    float scaled = ((mag - DZ) / (32767.0f - DZ)) * 100.0f;   // 0..100 past the deadzone
+                    if (scaled > 100.0f) scaled = 100.0f;
+                    float inv = scaled / mag;
+                    axa = (int)(lxr * inv);
+                    aya = (int)(lyr * inv);
+                    haveAnalog = 1;
+                }
+            }
             if (xs.Gamepad.sThumbRX >  8000) cx = 1; else if (xs.Gamepad.sThumbRX < -8000) cx = -1;
             if (xs.Gamepad.sThumbRY >  8000) cy = 1; else if (xs.Gamepad.sThumbRY < -8000) cy = -1;
         }
     }
 
     s->button = b;
-    s->stickX = (int8_t)(lx * 100);
-    s->stickY = (int8_t)(ly * 100);
+    s->stickX = (int8_t)(haveAnalog ? axa : lx * 100);
+    s->stickY = (int8_t)(haveAnalog ? aya : ly * 100);
     s->substickX = (int8_t)(cx * 100);
     s->substickY = (int8_t)(cy * 100);
     s->triggerLeft  = (uint8_t)tl;
