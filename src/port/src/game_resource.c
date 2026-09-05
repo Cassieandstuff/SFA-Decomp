@@ -64,11 +64,13 @@ typedef struct { int id; RD* desc; } DllReg;
 // Real engine DLLs compiled into game_engine and registered by id (folder number).
 extern char sky_funcs[];      // src/dlls/engine/5/5.c  - SkyDllInterface (id 5)
 extern char player_funcs[];   // src/dlls/engine/15/15.c - PlayerDllInterface / gPlayerInterface (id 0xf)
+extern char dll_15_funcs[];   // src/dlls/engine/21/21.c - CurvesDllInterface / gPathControlInterface (id 0x15)
 
 static const DllReg* dllRegList(int* count) {
     static DllReg regs[] = {
         { 5, (RD*)sky_funcs },
         { 0xf, (RD*)player_funcs },
+        { 0x15, (RD*)dll_15_funcs },
     };
     *count = (int)(sizeof(regs) / sizeof(regs[0]));
     return regs;

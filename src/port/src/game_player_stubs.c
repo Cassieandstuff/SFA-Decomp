@@ -88,8 +88,7 @@ int arwprojectile_createLinkedEffect(void) { return 0; }
 int arwprojectile_placeForward(void) { return 0; }
 int arwprojectile_setLifetime(void) { return 0; }
 int characterDoEyeAnims(void) { return 0; }
-int curves_preparePointCollisionFrame(void) { return 0; }
-int curves_updateLocalPointTransforms(void) { return 0; }
+// curves_preparePointCollisionFrame / curves_updateLocalPointTransforms are now real (engine/21).
 int enemy_getCurveParams(void) { return 0; }
 int enemy_getFreezeRecoverSeconds(void) { return 0; }
 int getCurSeqNo(void) { return 0; }
@@ -104,6 +103,11 @@ int hudSetMagicCostPreview(void) { return 0; }
 // FLOAT-returning functions stubbed as int return garbage in the FP register (xmm0), not 0 - the
 // caller reads that garbage as a float, so e.g. `animSpeedA *= powfBitEstimate(...)` -> NaN position.
 // Implemented faithfully (interpolate/powfBitEstimate per vecmath.c; the rest standard math).
+// powfBitEstimate is defined below in this file; declare it here so interpolate's call passes
+// float args (not default-promoted to double). Without this prototype the call corrupts base/exp
+// (double byte-halves read as floats) and every interpolate() smoothing step diverges to NaN.
+float powfBitEstimate(float base, float exp);
+
 float interpolate(float a, float t, float exp) {
     return (t <= 1.0f) ? a * (1.0f - powfBitEstimate(1.0f - t, exp)) : 0.0f;
 }
@@ -126,7 +130,11 @@ int objGetNearestTypeTo(void) { return 0; }
 int objPosToMapBlockIdx(void) { return 0; }
 int objSetAnimField48to0(void) { return 0; }
 int objfx_shakeCameraByDistance(void) { return 0; }
-int playerHasKrazoaSpirit(void) { return 0; }
+// playerHasKrazoaSpirit is now real (engine/21). The save globals engine/21's link-only save helpers
+// reference (declared in dll_0017_savegame_api.h; save DLL not compiled): dummy backing storage so
+// the link resolves - the save-settings path is never exercised for the player.
+unsigned char saveData[0xE4];          /* SAVE_DATA_SIZE */
+unsigned char gSaveGameData[0x400];
 int playerShadowClearPositionOverride(void) { return 0; }
 int playerUpdateBlinkAnimation(void) { return 0; }
 float powfBitEstimate(float base, float exp) { return powf(base, exp); }
@@ -173,6 +181,33 @@ int trackGetNearestGroundOffset(void* obj, float x, float y, float z, float* out
     if (outGroundOffset) *outGroundOffset = y - gStairfaxGroundY;  // height above the floor
     return 1;
 }
+// trackGetIntersect: the segment sweep whose return becomes CurvesCollisionState.surfaceFlags
+// (engine/21 curves_advanceCollision:985) - THE signal that makes the player state machine consider
+// herself grounded. `results` = &segmentHits (TrackHitResults, planes[4][4]@0, surfaceTypes@0x50,
+// hitCount@0x6C). Report a flat walkable floor: up-normal (0,1,0) for the first hit, one hit, and the
+// surfaceFlags mask 0x2 (on ground) | 0x10 (HAS_NEARBY_FLOOR) - which satisfies engine/15's velocity
+// feedback gate (15.c:1021) and the idle->moving transition, without 0x1 (water/floor-resolve).
+int trackGetIntersect(void* contactSource, float* startPoints, float* endPoints, int pointCount,
+                      void* results, int flags) {
+    (void)contactSource; (void)startPoints; (void)endPoints; (void)pointCount; (void)flags;
+    if (results) {
+        float* planes = (float*)results;                 // planes[0] = {nx,ny,nz,d}
+        planes[0] = 0.0f; planes[1] = 1.0f; planes[2] = 0.0f; planes[3] = 0.0f;
+        *(signed char*)((unsigned char*)results + 0x50) = 0;   // surfaceTypes[0]: walkable (not water 0x21)
+        *(short*)((unsigned char*)results + 0x6C) = 1;         // hitCount = 1
+        *(unsigned char*)((unsigned char*)results + 0x6E) = 1; // hitMask
+    }
+    return 0x12;
+}
+// No-op collision helpers engine/21 calls over the flat floor (no dynamic track triangles yet).
+void trackIntersectBroadphase(void* obj, void* bounds, unsigned mask, int flags) { (void)obj;(void)bounds;(void)mask;(void)flags; }
+void trackInvalidateDynamicSlotsForObject(void* target) { (void)target; }
+void ObjHits_AddContactObject(void* obj, void* contactObj) { (void)obj; (void)contactObj; }
+// Link-only settings sinks reached from engine/21's loadSaveSettings (not on the player path).
+int setWidescreen(void) { return 0; }
+int setSubtitlesEnabled(void) { return 0; }
+int audioSetSoundMode(void) { return 0; }
+int audioSetVolumes(void) { return 0; }
 int trickyImpress(void) { return 0; }
 float vec3f_distanceSquared(float* a, float* b) {
     float dx=a[0]-b[0], dy=a[1]-b[1], dz=a[2]-b[2]; return dx*dx+dy*dy+dz*dz;

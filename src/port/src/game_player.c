@@ -112,6 +112,8 @@ void stairfax_player_dll_tick(void) {
     // playerUpdateSurfaceResponse resolves waterDepth to not-submerged. Removed once real water
     // collision is wired.
     { unsigned char* st = *(unsigned char**)(gPlayerObj + 0xB8); if (st) *(float*)(st + 0x1C0) = -100000.0f; }
+    // (Ground contact - baddie.groundContact/surfaceFlags - is now produced by the real engine/21
+    // path-control each frame via trackGetIntersect; the harness no longer force-writes it.)
 
     if (tr) { static int q=0; if(q++<3){ fprintf(stderr,"[player-dll] calling playerUpdate\n"); fflush(stderr);} }
     playerUpdate(gPlayerObj);
@@ -138,13 +140,11 @@ void stairfax_player_dll_tick(void) {
         *(float*)(o + 0x20) = *(float*)(o + 0x14);   // worldPosZ = localPosZ
     }
 
-    // Interim locomotion (Milestone 2): SFA's real walk SPEED comes from the walk MOVE's root motion
-    // (baddie.animSpeedA/B), which needs the animation move-system not yet ported - so the real
-    // playerUpdate computes the camera-relative heading (PlayerState.inputHeading @0x474, =
-    // getAngle(stick) - cameraYaw, where cameraYaw is the camera shim's yaw) but produces zero speed.
-    // Drive the character along that REAL heading at a fixed walk speed here while the move system is
-    // stubbed; this comes out once Milestone 3 lands. inputMagnitude @0x298.
-    {
+    // Interim locomotion shim (Milestone 2), now OFF by default (STAIRFAX_SHIM_MOVE to re-enable):
+    // it moved localPos directly to stand in for the unported move-system speed. With engine/21
+    // path-control live, the REAL velocity->position path owns movement; running this shim too makes
+    // it a second uncoordinated mover that feeds the velocity feedback a runaway (animSpeedC -> inf).
+    if (getenv("STAIRFAX_SHIM_MOVE")) {
         unsigned char* st = *(unsigned char**)(gPlayerObj + 0xB8);   // PlayerState (obj->extra)
         float imag = st ? *(float*)(st + 0x298) : 0.0f;
         if (st && imag > 0.05f) {
@@ -162,27 +162,23 @@ void stairfax_player_dll_tick(void) {
     }
 
     if (getenv("STAIRFAX_PLAYER_DLL_TRACE")) {
-        static int f = 0;
-        if ((f++ % 60) == 0) {
-            unsigned char* o = gPlayerObj;
-            float px = *(float*)(o + 0x0C), py = *(float*)(o + 0x10), pz = *(float*)(o + 0x14);
-            short yaw = *(short*)(o + 0x00);
-            unsigned char* inner = *(unsigned char**)(o + 0xB8);   // PlayerState (obj->extra)
-            unsigned flags360 = inner ? *(unsigned*)(inner + 0x360) : 0;
-            float speed = inner ? *(float*)(inner + 0x470) : 0.0f;  // currentSpeed region
-            float vx=*(float*)(o+0x24), vy=*(float*)(o+0x28), vz=*(float*)(o+0x2C);
-            short cmode = inner?*(short*)(inner+0x274):0, stateId = inner?*(short*)(inner+0x278):0;
-            unsigned f0 = inner?*(unsigned*)(inner+0x25C):0;   // baddie.flags0 region (gravity gate)
-            int stickY = inner?*(int*)(inner+0x6D4):0;          // set by playerDoControls from padGetStickY
-            // baddie motion chain (BaddieState @ PlayerState+0): moveInputZ->inputMagnitude->animSpeed->velocity
-            float mInZ = inner?*(float*)(inner+0x28C):0.0f, imag = inner?*(float*)(inner+0x298):0.0f;
-            float spA = inner?*(float*)(inner+0x280):0.0f, spB = inner?*(float*)(inner+0x284):0.0f;
-            float mSpeed = inner?*(float*)(inner+0x2A0):0.0f;
-            unsigned char curAnim = inner?*(unsigned char*)(inner+0x8C8):0, gait = inner?*(unsigned char*)(inner+0x8CA):0;
-            fprintf(stderr, "[player-dll] f=%d pos=(%.1f,%.1f,%.1f) yaw=%d imag=%.2f inHead=%d curAnim=0x%x\n",
-                    f, px, py, pz, yaw, imag, (int)(short)(inner?*(short*)(inner+0x474):0), curAnim);
-            (void)f0; (void)vx; (void)vy; (void)vz; (void)stateId; (void)flags360; (void)stickY;
-            (void)mInZ; (void)spA; (void)spB; (void)mSpeed; (void)gait; (void)cmode;
+        static int f = 0; f++;
+        unsigned char* o = gPlayerObj;
+        unsigned char* inner = *(unsigned char**)(o + 0xB8);   // PlayerState (obj->extra)
+        float imag = inner ? *(float*)(inner + 0x298) : 0.0f;
+        // Per-frame locomotion trace while moving: controlMode@0x274 (1 idle / 2 moving),
+        // animSpeedA/C@0x280/0x294 (velocity + gait drivers), currentMove@0xA0, position@0x0C/0x14.
+        // Capped so it doesn't spam a long run.
+        static int nMove = 0;
+        if (inner && imag > 0.05f && nMove < 120) { nMove++;
+            short ctrlMode = *(short*)(inner + 0x274);
+            float spA = *(float*)(inner + 0x280);
+            float spC = *(float*)(inner + 0x294);
+            int   curMove = *(int*)(o + 0xA0);
+            float locX = *(float*)(o + 0x0C), locZ = *(float*)(o + 0x14);
+            float velX = *(float*)(o + 0x24), velZ = *(float*)(o + 0x2C);
+            fprintf(stderr, "[mv] f=%d ctrl=%d spA=%.3f spC=%.3f imag=%.2f vel=(%.3f,%.3f) loc=(%.1f,%.1f) move=%d\n",
+                    f, ctrlMode, spA, spC, imag, velX, velZ, locX, locZ, curMove);
         }
     }
 }

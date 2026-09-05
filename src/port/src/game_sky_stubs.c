@@ -62,8 +62,6 @@ int Camera_GetFovY(void) { return 0; }
 int Camera_GetInverseViewMatrix(void) { return 0; }
 int Camera_RebuildProjectionMatrix(void) { return 0; }
 int Camera_SetFarPlane(void) { return 0; }
-int Curve_EvalCatmullRom(void) { return 0; }
-int Curve_EvalLinear(void) { return 0; }
 int GXSetFog(void) { return 0; }
 int GXSetNumIndStages(void) { return 0; }
 int GXSetNumTevStages(void) { return 0; }
