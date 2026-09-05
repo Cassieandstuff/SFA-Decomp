@@ -89,7 +89,6 @@ int modelLightStruct_setSpecularColor(void) { return 0; }
 int moonFxRenderCallback(void) { return 0; }
 int objCreateLight(void) { return 0; }
 int objRender(void) { return 0; }
-int selectTexture(void) { return 0; }
 int shadowSetLightDirection(void) { return 0; }
 int vecRotateZXY(void) { return 0; }
 

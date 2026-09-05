@@ -25,6 +25,17 @@ extern void  bswapModelRenderOps(void* p);
 extern double acos(double);   // avoid <math.h> so we don't hit ucrt's inline acosf
 extern float sinf(float), cosf(float);   // same reason: pull from the CRT without <math.h>
 
+// Model texture resolution helpers (TEX1 decode + RHI upload). Forward-declared with struct
+// tags so this C TU stays free of the renderer/asset headers; the linker matches by name.
+struct RhiInstance; struct RhiTexture;
+extern struct RhiInstance* vi_host_rhi(void);
+extern struct RhiTexture*  rhi_createTexture(struct RhiInstance* rhi, int w, int h, int mipLevels,
+                                             unsigned gxFmt, const void* data);
+extern int  asset_loadTexRecord(const unsigned char* tab, int tabSize, const unsigned char* bin,
+                                int binSize, int id, unsigned char* out, size_t cap,
+                                int* w, int* h, int* fmt, unsigned* imgOff);
+extern unsigned char* gxTexDecode(int fmt, int w, int h, const unsigned char* src);
+
 // --- MODELS.tab / MODELS.bin -------------------------------------------------
 // TWO model tables: the ROOT-level MODELS.tab/bin is the GLOBAL table objects load their
 // character/prop models from (the OBJECTS.bin modelFileIds index it); each <dir>/MODELS.tab is
@@ -203,8 +214,106 @@ void* getCurrentDataFile(int id) {
     if (id == 0x2f) { modelsEnsureLoaded(); return gAnimTab; }  // ANIM.TAB (per-dir, host-swapped)
     void* p = 0; loadAssetFileById(&p, id); return p;
 }
-void* textureIdxToPtr(void) { return 0; }
-void* textureLoad(void) { return 0; }
+// textureIds[i] holds whatever textureLoad returned (a ModelTex handle) reinterpreted as s32;
+// textureIdxToPtr converts it back to the pointer (ObjModel_GetTexture's render-time resolve).
+void* stairfax_modeltex_rhi(void* p);   // fwd (defined below)
+extern void gx_draw_setTexture(struct RhiTexture* tex);
+void* textureIdxToPtr(int index) {
+    void* p = (void*)(intptr_t)index;
+    // The real render path resolves each render op's textures through here right before binding
+    // them to GX. The port's TEV/texture-stage setup is stubbed, so bind the base texture to the
+    // RHI sampler as a side effect: any handle that is one of our ModelTex records decodes+binds.
+    struct RhiTexture* rt = (struct RhiTexture*)stairfax_modeltex_rhi(p);
+    if (rt) gx_draw_setTexture(rt);
+    return p;
+}
+
+// --- model texture cache (TEX1: area slot A + warlock/common slot B) ---------
+// ObjModel_Load calls textureLoad(-(rawId | 0x8000), 1) per model texture and patches the return
+// into ModelFileHeader.textureIds[i]; ObjModel_ResolveRenderOpTextures then copies it into each
+// render op's layers[].texture (Shader+0x24). We return a small ModelTex handle (cached by rawId);
+// renderModel later calls stairfax_modeltex_rhi to lazily decode the TEX1 record into an RhiTexture
+// and bind it. Decode is deferred to render time so the RHI is guaranteed up.
+typedef struct ModelTex { int rawId; int tried; struct RhiTexture* rt; } ModelTex;
+static ModelTex** gModelTex; static int gModelTexN, gModelTexCap;
+static ModelTex* modelTexGet(int rawId) {
+    for (int i = 0; i < gModelTexN; ++i) if (gModelTex[i]->rawId == rawId) return gModelTex[i];
+    if (gModelTexN == gModelTexCap) {
+        int nc = gModelTexCap ? gModelTexCap * 2 : 64;
+        ModelTex** n = (ModelTex**)realloc(gModelTex, (size_t)nc * sizeof(ModelTex*));
+        if (!n) return 0; gModelTex = n; gModelTexCap = nc;
+    }
+    ModelTex* m = (ModelTex*)calloc(1, sizeof(ModelTex)); if (!m) return 0;
+    m->rawId = rawId; gModelTex[gModelTexN++] = m; return m;
+}
+void* textureLoad(int texId, unsigned char flag) {
+    (void)flag;
+    return modelTexGet((-texId) & 0x7fff);   // texId arrives as -(rawId | 0x8000)
+}
+
+// TEX1 sources: per-area (slot A) + warlock/common (slot B, where character textures live).
+static unsigned char* gTex1Tab; static int gTex1TabSize;
+static unsigned char* gTex1Bin; static int gTex1BinSize;
+static unsigned char* gCTex1Tab; static int gCTex1TabSize;
+static unsigned char* gCTex1Bin; static int gCTex1BinSize;
+static int gTex1Registered;
+static void tex1EnsureLoaded(void) {
+    if (gTex1Registered) return; gTex1Registered = 1;
+    const char* dir = getenv("STAIRFAX_MODEL_DIR"); if (!dir) dir = "desert";
+    char p[128];
+    snprintf(p, sizeof p, "%s/TEX1.tab", dir); gTex1Tab = (unsigned char*)loadFileByPath(p, &gTex1TabSize, 0);
+    snprintf(p, sizeof p, "%s/TEX1.bin", dir); gTex1Bin = (unsigned char*)loadFileByPath(p, &gTex1BinSize, 0);
+    gCTex1Tab = (unsigned char*)loadFileByPath((char*)STAIRFAX_COMMON_MODEL_DIR "/TEX1.tab", &gCTex1TabSize, 0);
+    gCTex1Bin = (unsigned char*)loadFileByPath((char*)STAIRFAX_COMMON_MODEL_DIR "/TEX1.bin", &gCTex1BinSize, 0);
+}
+
+// Lazily decode a ModelTex's TEX1 record into an RhiTexture and return it (NULL until the RHI is
+// up or on decode failure). Called from renderModel with a render op's layers[].texture pointer.
+static unsigned char gModelTexBuf[4 * 1024 * 1024];
+void* stairfax_modeltex_rhi(void* p) {
+    if (!p) return 0;
+    ModelTex* m = 0;
+    for (int i = 0; i < gModelTexN; ++i) if ((void*)gModelTex[i] == p) { m = gModelTex[i]; break; }
+    if (!m) return 0;
+    if (m->tried) return m->rt;
+    struct RhiInstance* rhi = vi_host_rhi();
+    if (!rhi) return 0;                       // RHI not up yet: retry next frame
+    m->tried = 1;
+    tex1EnsureLoaded();
+    int aw=0, ah=0, af=0; unsigned aio=0; int aok = 0;
+    int cw=0, ch=0, cf=0; unsigned cio=0; int cok = 0;
+    if (gCTex1Tab && asset_loadTexRecord(gCTex1Tab, gCTex1TabSize, gCTex1Bin, gCTex1BinSize, m->rawId,
+                                         gModelTexBuf, sizeof gModelTexBuf, &cw, &ch, &cf, &cio)) cok = 1;
+    // common (warlock) holds the character textures; probe it first and prefer it. area is the
+    // fallback for area-local props whose ids the common set doesn't carry.
+    int w, h, fmt; unsigned io; const char* srcName;
+    if (cok) { w=cw; h=ch; fmt=cf; io=cio; srcName="common"; }
+    else if (gTex1Tab && asset_loadTexRecord(gTex1Tab, gTex1TabSize, gTex1Bin, gTex1BinSize, m->rawId,
+                                             gModelTexBuf, sizeof gModelTexBuf, &aw, &ah, &af, &aio)) {
+        w=aw; h=ah; fmt=af; io=aio; srcName="area"; aok=1;
+    } else { srcName=0; }
+    if (srcName) {
+        unsigned char* rgba = gxTexDecode(fmt, w, h, gModelTexBuf + io);
+        if (rgba) { m->rt = rhi_createTexture(rhi, w, h, 1, (unsigned)fmt, rgba); free(rgba); }
+        if (getenv("STAIRFAX_MODEL_TEX"))
+            fprintf(stderr, "[modeltex] id=%d -> %s %dx%d fmt=%d %s (common=%d area=%d)\n",
+                    m->rawId, srcName, w, h, fmt, m->rt ? "ok" : "decode-fail", cok, aok);
+    } else if (getenv("STAIRFAX_MODEL_TEX")) {
+        fprintf(stderr, "[modeltex] id=%d NOT in area/common TEX1\n", m->rawId);
+    }
+    return m->rt;
+}
+
+// selectTexture(texture, mapId): the real objRenderModel/modelDoRenderInstrs path binds each
+// render op's textures through this (objprint_dolphin.c). `texture` is the ModelTex handle
+// textureLoad returned (via textureIdxToPtr). The RHI has a single sampler, so bind only the
+// base color layer (mapId 0); a null base (untextured op) naturally clears the binding. Other
+// stages (aux/indirect/noise/shadow) are ignored. This is what textures the default player.
+extern void gx_draw_setTexture(struct RhiTexture* tex);
+void selectTexture(void* texture, int mapId) {
+    if (mapId != 0) return;
+    gx_draw_setTexture((struct RhiTexture*)stairfax_modeltex_rhi(texture));
+}
 
 // Size of anim id `idx` in ANIM.BIN = delta of consecutive (host-order) ANIM.TAB offsets.
 static unsigned animEntrySize(int idx) {

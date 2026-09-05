@@ -366,6 +366,11 @@ static int decodePrim(const unsigned char* src, GXVtxFmt fmt, u8 prim, int nvert
                         unsigned maxIdx = (unsigned)(gSrcHi - ar->base) / (unsigned)ar->stride;
                         inBounds = (idx < maxIdx);
                     }
+                    // gSrcLo/gSrcHi bounds the POS vertex buffer (the spike guard). NRM/CLR/TEX
+                    // arrays live in separate buffers outside that window, so the window check
+                    // doesn't apply to them - allow the read rather than dropping their attribute
+                    // (which left every skinned vertex with no UV -> haveTex=0 -> untextured).
+                    else inBounds = 1;
                 }
                 if (inBounds) { int ac = 0; readAttrValue(a, v, ar->base + idx*ar->stride, &ac, &out, &haveTex); }
                 else if (a == GX_VA_POS) posOk = 0;   // bad position -> drop vertex, not a spike

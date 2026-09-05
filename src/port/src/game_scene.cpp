@@ -132,6 +132,7 @@ extern "C" { void* ObjModel_Load(int id, int loadFlag, int* outSize); int stairf
     void modelAnimEvalChannels(uint8_t* dst, void* model, void* channel, float blend, int flags);
     void PSMTXConcat(const float* a, const float* b, float* ab);
     void* getCache(void);
+    void* stairfax_modeltex_rhi(void* modelTexHandle);   // resolve a render op's TEX1 texture
     extern int* gModelAnimOffsetTable; }
 
 // Minimal ObjModel/ObjAnimComponent/ObjAnimState harness wired to a model header, so the REAL
@@ -491,7 +492,7 @@ static void renderModel(const DispModel& dm, const float camView[3][4],
         mv[r][3]=camView[r][0]*dm.wx + camView[r][1]*dm.wy + camView[r][2]*dm.wz + camView[r][3]; }
     GXLoadPosMtxImm(mv, GX_PNMTX0); GXSetCurrentMtx(GX_PNMTX0);
     gx_draw_setSourceBounds(h, h + 0x80000);
-    gx_draw_setTexture(nullptr);   // untextured for this first slice
+    gx_draw_setTexture(nullptr);   // default; each render op rebinds its own TEX1 texture below
 
     // Bind-pose joint offsets: worldPos = localPos + (accumHead - tail), accumHead summing
     // bone head translations down the parent chain (matches model_view). Extra joints blend.
@@ -621,6 +622,17 @@ static void renderModel(const DispModel& dm, const float camView[3][4],
                 gx_draw_setJointOffsets(slotOff, 16);
             }
 
+            // Bind this render op's TEX1 texture + alpha mode (mirrors the terrain path). After
+            // load, layers[0].texture (Shader+0x24) holds the ModelTex handle textureLoad returned;
+            // stairfax_modeltex_rhi lazily decodes it to an RhiTexture. Untextured ops stay null.
+            { RhiTexture* mtex=nullptr; int amode=RHI_ALPHA_OPAQUE;
+              if (curOp && curOp[0x41] > 0) {
+                  mtex = (RhiTexture*)stairfax_modeltex_rhi(*(void* const*)(curOp + 0x24));
+                  unsigned shFlags = *(const unsigned*)(curOp + 0x3C);
+                  if (shFlags & 0x60000000u)      amode = RHI_ALPHA_BLEND;
+                  else if (shFlags & 0x400u)      amode = RHI_ALPHA_TEST; }
+              gx_draw_setTexture(mtex); gx_draw_setAlphaMode(amode); }
+
             if (validateStride(dl, dls, posOff, posSz, descStride, vc)) {
                 // Descriptor-derived layout is correct: full attribute path.
                 gx_draw_setForceLayout(0,0,0);
@@ -659,6 +671,7 @@ static void renderModel(const DispModel& dm, const float camView[3][4],
     gx_draw_setJointOffsets(nullptr, 0);
     gx_draw_setJointMatrices(nullptr, 0);
     gx_draw_setForceLayout(0, 0, 0);
+    gx_draw_setTexture(nullptr); gx_draw_setAlphaMode(RHI_ALPHA_OPAQUE);   // don't leak into next model
 }
 
 // SEH-guarded wrapper: the interim renderModel autodetects vertex stride by scanning display

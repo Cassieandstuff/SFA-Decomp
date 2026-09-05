@@ -96,10 +96,18 @@ void* Shader_getLayer(void) { return gDummy; }
 int  textureGetAnimationFrame(void) { return 0; }
 void addVertexColorStage(void) {}
 void addVertexColorKAlphaStage(void) {}
-void addTexLayerStage(void) {}
-void addTexLayerStageKColor(void) {}
-void addTexLayerStageKAlpha(void) {}
-void addTexLayerStageSwizzled(void) {}
+// The real standard render path (objSetupRenderOpGxState -> addShaderLayerStages) binds each
+// shader layer's texture through these. The first arg is the ModelTex handle textureLoad
+// resolved (via textureIdxToPtr); route it to the RHI base sampler (single-texture) so the
+// player and other real-path objects render textured. Remaining TEV/lighting stays stubbed.
+struct RhiTexture;
+extern void  gx_draw_setTexture(struct RhiTexture* tex);
+extern void* stairfax_modeltex_rhi(void* modelTexHandle);
+static void bindLayerTex(void* tex) { gx_draw_setTexture((struct RhiTexture*)stairfax_modeltex_rhi(tex)); }
+void addTexLayerStage(void* tex) { bindLayerTex(tex); }
+void addTexLayerStageKColor(void* tex) { bindLayerTex(tex); }
+void addTexLayerStageKAlpha(void* tex) { bindLayerTex(tex); }
+void addTexLayerStageSwizzled(void* tex) { bindLayerTex(tex); }
 void addKColorModulateStage(void) {}
 void addColorFadeStage(void) {}
 void addLitColorStage(void) {}
