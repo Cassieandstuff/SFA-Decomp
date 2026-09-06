@@ -99,6 +99,15 @@ void stairfax_player_dll_tick(void) {
             fprintf(stderr, "[player-dll] init done; pos=(%.1f,%.1f,%.1f)\n",
                     *(float*)(o+0x0C), *(float*)(o+0x10), *(float*)(o+0x14)); fflush(stderr);
         }
+        // Real camera: the port harness skips the object system's own camera setup (object.c:838-848),
+        // so point the real engine/1 camcontrol at the player and enter the standard follow mode here.
+        // Default for a spawned player (the interim port follow-cam no longer reaches the player once
+        // camera.c owns Camera_GetCurrent); STAIRFAX_NO_REAL_CAM is a kill-switch. worldPos is synced
+        // below on the first frame, but init/setMode only need a valid focus object + start position.
+        {
+            extern void stairfax_real_camera_setup(void* player);
+            if (!getenv("STAIRFAX_NO_REAL_CAM")) stairfax_real_camera_setup(gPlayerObj);
+        }
     }
 
     // Frame-rate independence: SFA is a variable-timestep engine. waitNextFrame() (runs each frame in
@@ -154,6 +163,25 @@ void stairfax_player_dll_tick(void) {
         *(float*)(o + 0x18) = *(float*)(o + 0x0C);   // worldPosX = localPosX
         *(float*)(o + 0x1C) = *(float*)(o + 0x10);   // worldPosY = localPosY
         *(float*)(o + 0x20) = *(float*)(o + 0x14);   // worldPosZ = localPosZ
+    }
+
+    // Real-camera diagnostic (STAIRFAX_CAM_TRACE): the real follow cam updates in Obj_UpdateAllObjects
+    // (object.c:2571) BEFORE this harness runs inside sceneRender, so this reads the current frame's
+    // camera pose to confirm it tracks the player before the render is switched onto it.
+    { extern void stairfax_real_camera_trace(void* player); stairfax_real_camera_trace(gPlayerObj); }
+
+    // Direction/steering diagnostic (STAIRFAX_DIR_TRACE): does a CONSTANT stick converge to a fixed
+    // heading (absolute camera-relative, correct) or spiral (camera<->player feedback = "steering
+    // wheel")? Trace moveInput, inputHeading, the camera yaw the player reads, and the player's yaw.
+    if (getenv("STAIRFAX_DIR_TRACE")) {
+        static int d=0; if ((d++ % 15)==0) {
+            unsigned char* st = *(unsigned char**)(gPlayerObj + 0xB8);
+            unsigned char* vc = (unsigned char*)0; { extern void* Camera_GetCurrent(void); vc=(unsigned char*)Camera_GetCurrent(); }
+            if (st) fprintf(stderr, "[dir] mIn=(%.2f,%.2f) inHead=%d camYaw@330=%d yaw@484=%d viewYaw=%d\n",
+                    *(float*)(st+0x290), *(float*)(st+0x28c), *(int*)(st+0x474),
+                    *(short*)(st+0x330), *(short*)(st+0x484), vc?*(short*)vc:0);
+            fflush(stderr);
+        }
     }
 
     // Interim locomotion shim (Milestone 2), now OFF by default (STAIRFAX_SHIM_MOVE to re-enable):

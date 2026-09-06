@@ -250,6 +250,21 @@ add_executable(game_engine EXCLUDE_FROM_ALL
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/main/objanim.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/main/objprint_dolphin.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/main/curves.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/main/camera.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/main/voxmaps.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/engine/1_camcontrol/camcontrol.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/engine/66/66.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/engine/67/67.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/engine/68/68.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/engine/69/69.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/engine/72/72.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/engine/73/73.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/engine/75/75.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/engine/80/80.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/engine/82/82.c
+    src/game_camera_stubs.c
+    src/game_camcontrol_stubs.c
+    src/game_camera_wire.c
     src/game_objanim_stubs.c
     src/game_objprint_stubs.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/engine/5/5.c

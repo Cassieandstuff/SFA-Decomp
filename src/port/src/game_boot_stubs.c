@@ -32,13 +32,10 @@ void C_MTXOrtho(void* mm, float t, float b, float l, float r, float n, float f) 
     m[3][0] = 0.0f; m[3][1] = 0.0f; m[3][2] = 0.0f; m[3][3] = 1.0f;
 }
 
-// --- flip ring-queue (no GP FIFO to pace; report empty so we never stall) ---
-int  Queue_GetCount(void* q)                       { (void)q; return 0; }
-void Queue_Push(void* q, void* src)                { (void)q; (void)src; }
-void Queue_Init(void* q, void* data, int cap, int elem) { (void)q; (void)data; (void)cap; (void)elem; }
+// Queue_GetCount/Push/Init are now real (queue.c via the object/camera subtree).
 
 // --- camera / PE helpers (GP state; no-op on host) -------------------------
-void Camera_ApplyFullViewport(void)                     { }
+// Camera_ApplyFullViewport is now the real camera.c version.
 void gxSetPeControl_ZCompLoc_(unsigned char z)          { (void)z; }
 void gxSetZMode_(unsigned char e, int func, unsigned char u) { (void)e; (void)func; (void)u; }
 

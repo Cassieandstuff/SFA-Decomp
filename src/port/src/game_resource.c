@@ -65,12 +65,43 @@ typedef struct { int id; RD* desc; } DllReg;
 extern char sky_funcs[];      // src/dlls/engine/5/5.c  - SkyDllInterface (id 5)
 extern char player_funcs[];   // src/dlls/engine/15/15.c - PlayerDllInterface / gPlayerInterface (id 0xf)
 extern char dll_15_funcs[];   // src/dlls/engine/21/21.c - CurvesDllInterface / gPathControlInterface (id 0x15)
+// Real-camera bring-up: engine/1 camcontrol (id 1) + engine/66 standard follow cam (0x42). Registered
+// UNCONDITIONALLY: once camcontrol.c is compiled in, the player calls its real functions (e.g.
+// camcontrol_setAButtonIconForTarget) directly, and those deref camcontrol state (gCamcontrolCamera)
+// that only Camera_initialise (the id-1 acquire) sets up - so leaving id 1 unregistered null-derefs.
+// Registering is safe with no follow mode set: Obj_UpdateAllObjects drives Camera_update (object.c:2571)
+// which takes the focus==NULL early-out (camcontrol.c:1398) until stairfax_real_camera_setup runs
+// setMode(0x42). The actual follow-cam ACTIVATION (setMode + the render switch) is gated on the player
+// spawning, in game_camera_wire.c / game_scene.cpp, not here.
+extern char gCamcontrolResourceDescriptor[];   // camcontrol.c - CamcontrolResourceDescriptor (id 1)
+extern char gCameraModeNormalDescriptor[];      // engine/66 - locomotion follow (0x42)
+extern char gCameraModeStaffAnimDescriptor[];   // engine/67 - staff-aim/action (0x43)
+extern char gCameraModeViewfinderDescriptor[];  // engine/68 - first-person viewfinder (0x44)
+extern char gCameraModeTalkDescriptor[];        // engine/69 - talk/look-at-NPC (0x45)
+extern char gCameraModeStaticDescriptor[];      // engine/72 - static fixed-point (0x48)
+extern char gCameraModeCombatDescriptor[];      // engine/73 - combat/lock-on (0x49)
+extern char gCameraModeClimbDescriptor[];       // engine/75 - climb (0x4B)
+extern char gCameraModeCrawlDescriptor[];       // engine/80 - crawl (0x50)
+extern char gCameraModeForceBehindDescriptor[]; // engine/82 - force-behind snap (0x52)
 
 static const DllReg* dllRegList(int* count) {
-    static DllReg regs[] = {
+    static const DllReg regs[] = {
         { 5, (RD*)sky_funcs },
         { 0xf, (RD*)player_funcs },
         { 0x15, (RD*)dll_15_funcs },
+        // Camera mode-dispatch system: camcontrol + the mode-handler DLLs the game switches to by
+        // context (player.c / engine-66 call setMode(id) LIVE in the port's playerUpdate path). Each
+        // registered here activates for real; any un-brought-up id still falls to the stub handler.
+        { 1, (RD*)gCamcontrolResourceDescriptor },      // camera control DLL
+        { 0x42, (RD*)gCameraModeNormalDescriptor },     // locomotion follow (standing + moving)
+        { 0x43, (RD*)gCameraModeStaffAnimDescriptor },  // staff aim/action (L / staff)
+        { 0x44, (RD*)gCameraModeViewfinderDescriptor }, // first-person viewfinder (Z)
+        { 0x45, (RD*)gCameraModeTalkDescriptor },       // talk / look-at-NPC
+        { 0x48, (RD*)gCameraModeStaticDescriptor },     // static fixed-point (scripts)
+        { 0x49, (RD*)gCameraModeCombatDescriptor },     // combat / lock-on (near foes)
+        { 0x4B, (RD*)gCameraModeClimbDescriptor },      // climb (wall / ladder)
+        { 0x50, (RD*)gCameraModeCrawlDescriptor },      // crawl
+        { 0x52, (RD*)gCameraModeForceBehindDescriptor },// force-behind snap (transitions)
     };
     *count = (int)(sizeof(regs) / sizeof(regs[0]));
     return regs;

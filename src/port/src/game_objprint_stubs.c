@@ -18,19 +18,13 @@ double cos(double);
 
 static unsigned char gDummy[4096];   // zeroed; returned where real code may read fields
 
-// --- camera bridge: the real render path asks for the current view matrix ----
-// game_scene sets this each frame from its camView (3x4, row-major). Camera_GetViewMatrix
-// returns it so modelDoRenderInstrs composes world*view exactly as retail does.
+// --- camera bridge: the render path's view matrix -----------------------------
+// game_scene still writes gPortViewMatrix each frame; Camera_GetViewMatrix / culling / projection
+// are now the REAL camera.c versions (real-camera bring-up). gPortViewMatrix stays as the interim
+// render bridge until Stage 2 rewires game_scene onto the real camera output.
 float gPortViewMatrix[3][4] = {{1,0,0,0},{0,1,0,0},{0,0,1,0}};
-float* Camera_GetViewMatrix(void) { return &gPortViewMatrix[0][0]; }
 // gCameraLightPerspectiveMatrix: used to build projected-light tex matrices (unused untextured).
 float gCameraLightPerspectiveMatrix[3][4] = {{1,0,0,0},{0,1,0,0},{0,0,1,0}};
-
-// culling / projection helpers - return benign values so nothing culls the player away.
-float Camera_DistanceToCurrentViewPosition(void) { return 1000.0f; }
-int   Camera_ClipToScreen(void) { return 0; }
-int   Camera_ProjectWorldPointWithOffset(void) { return 0; }
-void  Obj_TransformWorldPointToLocal(void) { }
 
 // --- math bridges ------------------------------------------------------------
 // setMatrixFromObjectPos / setMatrixFromObjectTransposed / Matrix_TransformPoint / getAngle are

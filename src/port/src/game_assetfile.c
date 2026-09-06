@@ -38,6 +38,7 @@ static const struct { int id; const char* name; SwapFn sw; } gMldf[] = {
     { 0x1e, "MAPS.tab",     sw_u32      }, // per-map 7-word section offsets into MAPS.bin
     { 0x1d, "MAPS.bin",     sw_none     }, // romlist/map data (typed access via offsets)
     { 0x27, "TRKBLK.tab",   sw_u16      }, // cumulative per-romlist block-id bases (0xffff-term)
+    { 0x35, "VOXOBJ.tab",   sw_u32      }, // voxmaps_initialise map list (int*, -1-term); real camera
 };
 
 #define MLDF_MAX_ID 0x100

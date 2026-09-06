@@ -42,9 +42,6 @@ int ObjHits_InitWorkBuffers(void) { return 0; }
 int ObjHits_ResetWorkBuffers(void) { return 0; }
 int ObjHits_TickPriorityHitCooldowns(void) { return 0; }
 int ObjHits_Update(void) { return 0; }
-int Obj_BuildTransformMatrixSlot(void) { return 0; }
-int Obj_GetWorldPosition(void) { return 0; }
-int Obj_TransformLocalPointToWorld(void) { return 0; }
 int PSMTXMultVec(void) { return 0; }
 int PSMTXRotAxisRad(void) { return 0; }
 int PSVECCrossProduct(void) { return 0; }

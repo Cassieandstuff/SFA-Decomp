@@ -311,21 +311,37 @@ void padUpdate(void) {
 }
 
 // --- game wrappers (clean readers) ----------------------------------------
-uint32_t getButtonsHeld(int port)            { return (port > 0 || sJoypadDisabled) ? 0 : (sHeld[port] & sMask[port]); }
-uint32_t getButtonsJustPressed(int port)     { return (port > 0 || sJoypadDisabled) ? 0 : (sPressed[port] & sMask[port]); }
+// Headless test hook: STAIRFAX_FORCE_BUTTONS (hex, e.g. 0x10=Z 0x40=L 0x20=R) OR'd into held/pressed
+// so camera-mode context switches (engine/66 Z->viewfinder etc.) can be triggered without a controller.
+static uint32_t sfForcedButtons(void) { const char* f = getenv("STAIRFAX_FORCE_BUTTONS"); return f ? (uint32_t)strtoul(f, 0, 0) : 0u; }
+uint32_t getButtonsHeld(int port)            { return (port > 0 || sJoypadDisabled) ? 0 : ((sHeld[port] | sfForcedButtons()) & sMask[port]); }
+uint32_t getButtonsJustPressed(int port)     { return (port > 0 || sJoypadDisabled) ? 0 : ((sPressed[port] | sfForcedButtons()) & sMask[port]); }
 uint32_t getButtonsJustPressedIfNotBusy(int port) { if (port > 0) return 0; if (sJoypadDisabled) return 0xFFFFFFFFu; return sReleased[port] & sMask[port]; }
 uint32_t getNewInputs(int port)              { return port > 0 ? 0 : sHeld[port]; }
 
-int  padGetStickX(int port) { const char* f; if (port==0 && (f=getenv("STAIRFAX_FORCE_STICKX"))) return atoi(f);
+// Headless turn test: STAIRFAX_STICK_ROTATE=<period frames> sweeps the stick direction in a circle so
+// the player continuously TURNS (a straight forced stick just converges to one heading). Reproduces
+// camera behaviour during turns. sfStickFrame advances once per frame (in padGetStickY, read second).
+extern float sinf(float); extern float cosf(float);
+static int sfStickFrame = 0;
+static int sfRotatePeriod(void) { const char* r = getenv("STAIRFAX_STICK_ROTATE"); if (!r) return 0; int p = atoi(r); return p < 10 ? 120 : p; }
+int  padGetStickX(int port) { int p; const char* f;
+                              if (port==0 && (p=sfRotatePeriod())) return (int)(100.0f * cosf(6.2831853f*(float)(sfStickFrame % p)/(float)p));
+                              if (port==0 && (f=getenv("STAIRFAX_FORCE_STICKX"))) return atoi(f);
                               return (port > 0 || sJoypadDisabled) ? 0 : sStickX[port]; }
-int  padGetStickY(int port) { const char* f; if (port==0 && (f=getenv("STAIRFAX_FORCE_STICKY"))) return atoi(f);
+int  padGetStickY(int port) { int p; const char* f;
+                              if (port==0 && (p=sfRotatePeriod())) { int fr = sfStickFrame++; return (int)(100.0f * sinf(6.2831853f*(float)(fr % p)/(float)p)); }
+                              if (port==0 && (f=getenv("STAIRFAX_FORCE_STICKY"))) return atoi(f);
                               return (port > 0 || sJoypadDisabled) ? 0 : sStickY[port]; }
 int  padGetCX(int port)     { return (port > 0 || sJoypadDisabled) ? 0 : sSubX[port]; }
 int  padGetCY(int port)     { return (port > 0 || sJoypadDisabled) ? 0 : sSubY[port]; }
 unsigned char padGetLTrigger(int port) { return sJoypadDisabled ? 0 : sTrigL[port]; }
 unsigned char padGetRTrigger(int port) { return sJoypadDisabled ? 0 : sTrigR[port]; }
-uint16_t padGetTriggers(int port)        { if (port > 0) port = 0; return sJoypadDisabled ? 0 : sTriggers[port]; }
-uint16_t padGetTriggersPressed(int port) { if (port > 0) port = 0; return sJoypadDisabled ? 0 : sTrigPressed[port]; }
+// STAIRFAX_FORCE_TRIGGERS (hex, L=0x40 Z=0x10 R=0x20) OR'd in so the analog-trigger camera switches
+// (engine/66 L->staffanim uses padGetTriggersPressed, not getButtonsHeld) can be triggered headlessly.
+static uint16_t sfForcedTriggers(void) { const char* f = getenv("STAIRFAX_FORCE_TRIGGERS"); return f ? (uint16_t)strtoul(f, 0, 0) : 0u; }
+uint16_t padGetTriggers(int port)        { if (port > 0) port = 0; return sJoypadDisabled ? 0 : (sTriggers[port] | sfForcedTriggers()); }
+uint16_t padGetTriggersPressed(int port) { if (port > 0) port = 0; return sJoypadDisabled ? 0 : (sTrigPressed[port] | sfForcedTriggers()); }
 
 void padGetAnalogInput(int port, int8_t* x, int8_t* y) {
     if (sJoypadDisabled || port > 0) { *x = 0; *y = 0; return; }

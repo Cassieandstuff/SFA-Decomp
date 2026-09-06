@@ -14,6 +14,12 @@ typedef union PPCWGPipe2 {
     f64 f64;
 } PPCWGPipe2;
 
+#ifdef STAIRFAX_PORT
+extern volatile PPCWGPipe2 GXWGFifo;   /* port: the write-gather pipe is a real object defined in
+                                          gx_wgpipe.cpp (append-proxy -> RHI); MSVC can't parse the
+                                          Metrowerks hardware-address placement below. */
+#else
 PPCWGPipe2 GXWGFifo : (0xCC008000);
+#endif
 
 #endif /* DOLPHIN_GX_GXLEGACY_H_ */

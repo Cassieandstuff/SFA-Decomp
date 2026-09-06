@@ -18,16 +18,9 @@ float lbl_803E7EE0 = 1.0f;
 float lbl_803E7F14 = 0.2f;
 
 // --- function stubs (return 0; refine when a runtime crash proves one needs real behavior) ---
-int Angle_AddWrappedS16(void) { return 0; }
-int Angle_SubWrappedS16(void) { return 0; }
 int AudioStream_Play(void) { return 0; }
 int AudioStream_StartPrepared(void) { return 0; }
 int AudioStream_StopCurrent(void) { return 0; }
-int CameraShake_Enable(void) { return 0; }
-int CameraShake_SetOffset(void) { return 0; }
-float Camera_GetAspectRatio(void) { return 1280.0f / 720.0f; }   // float return (int garbage-> NaN)
-int Camera_GetWorldMatrix(void) { return 0; }
-int Camera_setBlendCurveMode(void) { return 0; }
 int Carryable_putDownAndSavePos(void) { return 0; }
 int GXSetColorUpdate(void) { return 0; }
 // out = 3x3 rotation part of the 3x4 matrix * vector (no translation). A no-op stub left `out`
@@ -57,8 +50,6 @@ int ObjPath_GetPointWorldPositionArray(void) { return 0; }
 int Obj_GetYawDeltaToObject(void) { return 0; }
 int Obj_IsObjectAlive(void) { return 0; }
 int Obj_SetParent(void) { return 0; }
-int Obj_TransformLocalVectorToWorld(void) { return 0; }
-int Obj_TransformWorldVectorToLocal(void) { return 0; }
 int Pause_ResetMenuFrameCounter(void) { return 0; }
 int RandomTimer_UpdateRangeTrigger(void) { return 0; }
 int Rcp_SetSpiritVisionEnabled(void) { return 0; }

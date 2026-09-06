@@ -29,19 +29,10 @@ void* saveGameGetEnvState(void) { return gEnvState; }
 int   randomGetRange(void) { return 0; }
 
 // --- link-only (sky render/lighting paths, not exercised yet) ---------------
-// The real player DLL calls Camera_GetCurrent() first thing and dereferences cam->yaw/pos/etc.
-// (camera-relative controls, focus math). A null return crashes it, so hand back a valid, zeroed
-// Camera (0x80 bytes covers the 0x60 struct + slack). Zeroed = yaw 0, origin - a safe default;
-// Phase B will populate it from the port's live follow-camera so controls track what's rendered.
+// gStubCamera is the port's interim camera pose. Camera_GetCurrent is now the REAL one in
+// src/main/camera.c (real-camera bring-up); the pose-setter below survives only until Stage 2
+// rewires game_scene onto camcontrol, so its writes go dead once the real Camera_GetCurrent wins.
 static unsigned char gStubCamera[0x80];
-void* Camera_GetCurrent(void) {
-    // scale (0x8) and fovY (0x18) must be non-zero: the player divides by them in its camera-relative
-    // math, so leaving them 0 makes the character's position go NaN. Sane defaults until Phase B
-    // feeds the real port camera.
-    static int init = 0;
-    if (!init) { init = 1; *(float*)(gStubCamera + 0x08) = 1.0f; *(float*)(gStubCamera + 0x18) = 1.0f; }
-    return gStubCamera;
-}
 
 // Interim camera shim (Milestone 2): game_scene pushes the port follow-cam pose here each frame so
 // the REAL playerUpdate - which reads Camera_GetCurrent()->yaw/pos for its camera-relative controls -
@@ -57,11 +48,6 @@ void stairfax_camera_set_pose(short yaw, short pitch, float x, float y, float z)
     *(float*)(gStubCamera + 0x10) = y;
     *(float*)(gStubCamera + 0x14) = z;
 }
-int Camera_GetFarPlane(void) { return 0; }
-int Camera_GetFovY(void) { return 0; }
-int Camera_GetInverseViewMatrix(void) { return 0; }
-int Camera_RebuildProjectionMatrix(void) { return 0; }
-int Camera_SetFarPlane(void) { return 0; }
 int GXSetFog(void) { return 0; }
 int GXSetNumIndStages(void) { return 0; }
 int GXSetNumTevStages(void) { return 0; }

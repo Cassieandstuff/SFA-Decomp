@@ -141,9 +141,6 @@ int timeStop[256];
 int AISetStreamPlayState(){ trace("AISetStreamPlayState"); return 0; }
 int AISetStreamVolLeft(){ trace("AISetStreamVolLeft"); return 0; }
 int AISetStreamVolRight(){ trace("AISetStreamVolRight"); return 0; }
-int Camera_ApplyCurrentViewport(){ trace("Camera_ApplyCurrentViewport"); return 0; }
-int Camera_InitState(){ trace("Camera_InitState"); return 0; }
-int Camera_UpdateShakeAndFarPlane(){ trace("Camera_UpdateShakeAndFarPlane"); return 0; }
 int LCDisable(){ trace("LCDisable"); return 0; }
 int LCEnable(){ trace("LCEnable"); return 0; }
 int Music_Trigger(){ trace("Music_Trigger"); return 0; }
@@ -160,7 +157,6 @@ int audioReset(){ trace("audioReset"); return 0; }
 int audioStopAll(){ trace("audioStopAll"); return 0; }
 int audioUpdate(){ trace("audioUpdate"); return 0; }
 int beginLoadingMap(){ trace("beginLoadingMap"); return 0; }
-int camcontrol_setAButtonIconForTarget(){ trace("camcontrol_setAButtonIconForTarget"); return 0; }
 int clearForceLoadImmediately(){ trace("clearForceLoadImmediately"); return 0; }
 int curUiDllDraw(){ trace("curUiDllDraw"); return 0; }
 int debugPrintDraw(){ trace("debugPrintDraw"); return 0; }
@@ -214,7 +210,6 @@ int uiDll_runFrameEndAndLoadNext(){ trace("uiDll_runFrameEndAndLoadNext"); retur
 int uiDll_runFrameStartAndLoadNext(){ trace("uiDll_runFrameStartAndLoadNext"); return 0; }
 int unloadMap(){ trace("unloadMap"); return 0; }
 int updateEnvironment(){ trace("updateEnvironment"); return 0; }
-int voxmaps_updateTimers(){ trace("voxmaps_updateTimers"); return 0; }
 int waterFxInit(){ trace("waterFxInit"); return 0; }
 int waterFxUpdate(){ trace("waterFxUpdate"); return 0; }
 int mmSetForceHeap3Only(){ trace("mmSetForceHeap3Only"); return 0; }

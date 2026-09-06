@@ -53,6 +53,9 @@ extern "C" {
     void* stairfax_spawn_player(int seq, float x, float y, float z);  // port-side player spawn
     void  stairfax_render_player(void* obj, int move, float progress); // real objRenderModel path
     extern float gPortViewMatrix[3][4];                              // port->real camera bridge
+    float* Camera_GetViewMatrix(void);                               // real camera.c view matrix
+    void*  Camera_GetCurrent(void);                                  // real view Camera (pos@0x0C..0x14)
+    extern int gStairfaxRealCamActive;                               // 1 once the real follow cam is driving
     // host input (pad_input.c)
     int padGetStickX(int); int padGetStickY(int);
     int padGetCX(int);     int padGetCY(int);
@@ -1081,6 +1084,37 @@ extern "C" void sceneRender(int a, int b, int c, int d, int e, int f) {
     for(int r=0;r<3;++r)for(int cc=0;cc<3;++cc){float s2=0;for(int k=0;k<3;++k)s2+=Rx[r][k]*Ry[k][cc];Rot[r][cc]=s2;}
     float camView[3][4];
     for(int r=0;r<3;++r){ float t=0; for(int k=0;k<3;++k){ camView[r][k]=Rot[r][k]; t-=Rot[r][k]*gCamPos[k]; } camView[r][3]=t; }
+
+    // Real camera: once the follow cam is activated (gStairfaxRealCamActive, set when the player spawns
+    // and setMode(0x42) runs), the engine/1 camcontrol + engine/66 cam produces a verified follow POSE
+    // (Camera_GetCurrent()->pos: ~90u behind, ~104u above the player). camcontrol never calls
+    // Camera_UpdateViewMatrices in the port's path though, so the real gCameraViewMatrix stays zero -
+    // build the view matrix here as a LOOK-AT from the real eye to the player, in the port's proven LH
+    // convention (right = up x fwd, +Z into screen). Feed it to BOTH terrain (camView) and the player
+    // render (write gCameraViewMatrix, which objprint's Camera_GetViewMatrix returns) so they are one
+    // coherent view. Keyed on the runtime flag so non-player dev runs keep their interim view.
+    if (gStairfaxRealCamActive && gPlayerObj) {
+        unsigned char* vc = (unsigned char*)Camera_GetCurrent();
+        if (vc) {
+            // Build the render from the real view Camera's SMOOTHED orientation (Camera_GetCurrent:
+            // yaw@0x00, pitch@0x02 s16, pos@0x0C) - NOT a per-frame look-at at Fox, which would always
+            // pin him dead-centre and remove engine/66's stable-when-still / centre-on-move smoothing.
+            // Port convention: look dir = (-sin(gCamYaw),0,cos(gCamYaw)); verified gCamYaw = +viewYaw
+            // (straight: viewYaw 180deg -> look -Z; diagonal: matches Fox's heading). Rot = Rx(pitch)*Ry(yaw).
+            float krad = 2.0f*3.14159265f/65536.0f;
+            float yaw = (float)(*(short*)(vc+0x00)) * krad;
+            float pit = -(float)(*(short*)(vc+0x02)) * krad;
+            float pos[3]={ *(float*)(vc+0x0C), *(float*)(vc+0x10), *(float*)(vc+0x14) };
+            float cY=cosf(yaw), sY=sinf(yaw), cP=cosf(pit), sP=sinf(pit);
+            float Ry2[3][3]={{cY,0,sY},{0,1,0},{-sY,0,cY}};
+            float Rx2[3][3]={{1,0,0},{0,cP,-sP},{0,sP,cP}};
+            float Rt[3][3];
+            for(int r=0;r<3;++r)for(int c2=0;c2<3;++c2){float s2=0;for(int k2=0;k2<3;++k2)s2+=Rx2[r][k2]*Ry2[k2][c2];Rt[r][c2]=s2;}
+            for(int r=0;r<3;++r){ float t=0; for(int k2=0;k2<3;++k2){ camView[r][k2]=Rt[r][k2]; t-=Rt[r][k2]*pos[k2]; } camView[r][3]=t; }
+            float* gvm=Camera_GetViewMatrix();   // player render bridge (objprint reads this)
+            if(gvm) for(int r=0;r<3;++r)for(int cc=0;cc<4;++cc) gvm[r*4+cc]=camView[r][cc];
+        }
+    }
 
     bool drawMap = !getenv("STAIRFAX_NO_MAP");
     for (auto& pl : gPlaces) {
