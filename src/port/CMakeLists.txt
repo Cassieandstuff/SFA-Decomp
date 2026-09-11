@@ -18,6 +18,30 @@ if(NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
         "fields. Configure with an x86 toolchain (vcvarsall x64_x86) or -A Win32.")
 endif()
 
+# ============================================================================
+#  Port source taxonomy (see src/port/docs/PORT_ARCHITECTURE.md)
+# ============================================================================
+# Every port translation unit lives in one of four role directories so the build
+# itself documents its role and lifecycle:
+#
+#   src/hal/       PERMANENT  - reimplements a Dolphin SDK / hardware / OS API
+#                              that real game TUs call by their original name
+#                              (GX, VI, OS, PAD, DVD, mm, the RHI backends, the
+#                              on-disc format/inflate/texture-decode facilities).
+#   src/bridge/    PERMANENT  - port-native glue that activates real game systems
+#                              and byte-order / ABI-translates across the seam
+#                              (scene render, camera wire, resource registry,
+#                              romlist, save-state, the byte-swap shims).
+#   src/scaffold/  TEMPORARY  - stubs standing in for not-yet-ported game systems.
+#                              Each is deleted when its real system comes up; every
+#                              one is inventoried in docs/SCAFFOLD_MANIFEST.md.
+#   src/platform/  PERMANENT  - host OS window / raw-input layer.
+#
+# The REAL game TUs (src/main, src/dlls) are NOT port code: they are compiled
+# unmodified and only referenced here. GAME_ROOT points at the repo root so those
+# references read cleanly.
+set(GAME_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..)
+
 # --- Backend toggles -------------------------------------------------------
 option(STAIRFAX_RHI_VULKAN "Enable Vulkan backend (primary)"                 ON)
 option(STAIRFAX_RHI_D3D12  "Enable D3D12 backend (primary on Windows)"        ON)
@@ -41,62 +65,67 @@ endif()
 add_library(stairfax_platform STATIC src/platform/plat_window_win32.c)
 target_include_directories(stairfax_platform PUBLIC ${RHI_INCLUDE})
 
-# --- Backend libraries -----------------------------------------------------
+# ============================================================================
+#  HAL: renderer backends (src/hal/renderer)
+# ============================================================================
 # Each renderer is its own static library. rhi_common (below) selects among them
 # through the vtable; every backend provides rhi_<name>_available/create so the
 # selector always links, even for a disabled/stubbed backend.
 
 # D3D11 (real)
-add_library(rhi_d3d11 STATIC src/renderer/rhi_d3d11.cpp)
+add_library(rhi_d3d11 STATIC src/hal/renderer/rhi_d3d11.cpp)
 target_include_directories(rhi_d3d11 PUBLIC ${RHI_INCLUDE})
 target_link_libraries(rhi_d3d11 PRIVATE d3d11 dxgi d3dcompiler)
 
 # D3D12 (real)
-add_library(rhi_d3d12 STATIC src/renderer/rhi_d3d12.cpp)
+add_library(rhi_d3d12 STATIC src/hal/renderer/rhi_d3d12.cpp)
 target_include_directories(rhi_d3d12 PUBLIC ${RHI_INCLUDE})
 target_link_libraries(rhi_d3d12 PRIVATE d3d12 dxgi d3dcompiler)
 
 # Vulkan: real if the SDK headers are found, otherwise a link-satisfying stub.
 find_package(Vulkan QUIET)
 if(Vulkan_FOUND)
-    add_library(rhi_vulkan STATIC src/renderer/rhi_vulkan.cpp)
+    add_library(rhi_vulkan STATIC src/hal/renderer/rhi_vulkan.cpp)
     target_compile_definitions(rhi_vulkan PRIVATE STAIRFAX_HAVE_VULKAN=1 VK_USE_PLATFORM_WIN32_KHR=1)
     target_include_directories(rhi_vulkan PRIVATE ${Vulkan_INCLUDE_DIRS})
     message(STATUS "Vulkan SDK found: ${Vulkan_INCLUDE_DIRS} (dynamic loader, no link)")
 else()
-    add_library(rhi_vulkan STATIC src/renderer/rhi_vulkan.c)
+    add_library(rhi_vulkan STATIC src/hal/renderer/rhi_vulkan.c)
     message(STATUS "Vulkan SDK NOT found - vulkan backend stubbed (install LunarG SDK to enable)")
 endif()
 target_include_directories(rhi_vulkan PUBLIC ${RHI_INCLUDE})
 
 # GL (stub for now)
-add_library(rhi_gl STATIC src/renderer/rhi_gl.c)
+add_library(rhi_gl STATIC src/hal/renderer/rhi_gl.c)
 target_include_directories(rhi_gl PUBLIC ${RHI_INCLUDE})
 
-# --- Common groundwork -----------------------------------------------------
 # Owns backend selection + vtable dispatch; depends on the backend libs.
-add_library(rhi_common STATIC src/renderer/rhi.c)
+add_library(rhi_common STATIC src/hal/renderer/rhi.c)
 target_include_directories(rhi_common PUBLIC ${RHI_INCLUDE})
 target_link_libraries(rhi_common PUBLIC rhi_d3d11 rhi_d3d12 rhi_vulkan rhi_gl)
 
-# --- VI shim (video interface -> RHI + window) -----------------------------
-add_library(stairfax_vi STATIC src/vi_shim.c)
+# ============================================================================
+#  HAL: SDK / hardware / storage shims (src/hal)
+# ============================================================================
+
+# VI shim (video interface -> RHI + window)
+add_library(stairfax_vi STATIC src/hal/vi_shim.c)
 target_include_directories(stairfax_vi PUBLIC ${RHI_INCLUDE})
 target_link_libraries(stairfax_vi PUBLIC rhi_common stairfax_platform)
 
-# --- GX shim (GX -> RHI draw path) -----------------------------------------
-add_library(stairfax_gx STATIC src/gx_shim.c src/tex_decode.c)
+# GX shim (GX -> RHI draw path)
+add_library(stairfax_gx STATIC src/hal/gx_shim.c src/hal/tex_decode.c)
 target_include_directories(stairfax_gx PUBLIC ${RHI_INCLUDE})
 target_link_libraries(stairfax_gx PUBLIC rhi_common)
 
-# --- DVD/fileio shim (disc reads -> host filesystem) + asset inflate --------
-add_library(stairfax_dvd STATIC src/dvd_shim.c src/stfx_inflate.c)
+# DVD/fileio shim (disc reads -> host filesystem) + asset inflate
+add_library(stairfax_dvd STATIC src/hal/dvd_shim.c src/hal/stfx_inflate.c)
 target_include_directories(stairfax_dvd PUBLIC ${RHI_INCLUDE})
 
-# --- Asset readers (on-disc format layer: ZLB/DIR, textures, map blocks) -----
-# Shared by the viewer tools; keeps format knowledge in one place. tex_decode.c
-# provides gxTexDecode (GX texel -> RGBA8); stairfax_dvd provides inflate + file IO.
-add_library(stairfax_assets STATIC src/assets.c src/tex_decode.c)
+# Asset readers (on-disc format layer: ZLB/DIR, textures, map blocks). Shared by
+# the viewer tools; keeps format knowledge in one place. tex_decode.c provides
+# gxTexDecode (GX texel -> RGBA8); stairfax_dvd provides inflate + file IO.
+add_library(stairfax_assets STATIC src/hal/assets.c src/hal/tex_decode.c)
 target_include_directories(stairfax_assets PUBLIC ${RHI_INCLUDE})
 target_link_libraries(stairfax_assets PUBLIC stairfax_dvd)
 
@@ -116,33 +145,49 @@ endif()
 set(GAME_INCLUDES
     ${CMAKE_CURRENT_SOURCE_DIR}/include        # src/port/include - shadows dolphin/*
     ${MSVC_SYS_INCLUDES}                         # real libc before repo stubs
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../include   # repo include/
-    ${CMAKE_CURRENT_SOURCE_DIR}/../..           # repo root
+    ${GAME_ROOT}/include                         # repo include/
+    ${GAME_ROOT}                                 # repo root
 )
 set(GAME_DEFS TARGET_PC=1 STAIRFAX_PORT=1 _CRT_SECURE_NO_WARNINGS=1)
 
-# --- OS shim (Dolphin OS API) ----------------------------------------------
-add_library(stairfax_os STATIC src/os_shim.c)
+# OS shim (Dolphin OS API)
+add_library(stairfax_os STATIC src/hal/os_shim.c)
 target_include_directories(stairfax_os PUBLIC ${GAME_INCLUDES})
 target_compile_definitions(stairfax_os PUBLIC ${GAME_DEFS})
 
-# --- mm shim (malloc-backed memory manager) --------------------------------
-# The real src/main/mm.c can't be compiled on host (it aliases named .bss globals as
-# one MmGlobalLayout via (MmGlobalLayout*)gMmStoreArray - a GC link-order overlay, like
-# pad.c). This shim reimplements mm's observable contract, including faithful
-# deferred-free timing. Its own lib so a future clean mm reimpl can drop in.
-add_library(stairfax_mm STATIC src/mm_shim.c)
+# mm shim (malloc-backed memory manager). The real src/main/mm.c can't be compiled
+# on host (it aliases named .bss globals as one MmGlobalLayout via
+# (MmGlobalLayout*)gMmStoreArray - a GC link-order overlay, like pad.c). This shim
+# reimplements mm's observable contract, including faithful deferred-free timing.
+# Its own lib so a future clean mm reimpl can drop in.
+add_library(stairfax_mm STATIC src/hal/mm_shim.c)
 target_include_directories(stairfax_mm PUBLIC ${GAME_INCLUDES})
 target_compile_definitions(stairfax_mm PUBLIC ${GAME_DEFS})
 
+# GX draw path (real GX vertex API + write-gather pipe -> RHI). The game submits
+# geometry by writing to GXWGFifo; this library implements the real GX signatures
+# + a FIFO interpreter. gx_wgpipe.cpp is C++ so the PPCWGPipe write-proxy overloads
+# are in effect (see the ppcwgpipe_struct.h host shadow).
+add_library(stairfax_gxdraw STATIC src/hal/gx_draw.c src/hal/gx_wgpipe.cpp)
+target_include_directories(stairfax_gxdraw PUBLIC ${GAME_INCLUDES})
+target_compile_definitions(stairfax_gxdraw PUBLIC ${GAME_DEFS})
+target_link_libraries(stairfax_gxdraw PUBLIC rhi_common)
+
+# NOTE: these HAL shims are authored but not yet wired into any target -
+# src/hal/pad_shim.c, ar_shim.c, card_shim.c, thp_shim.c, mtx_shim.c. They cover
+# boundaries (pad, audio, memory card, THP video, matrix) that no live target
+# exercises yet. Add them to a library / target when their subsystem comes up.
+
 # --- First real game TU compiled on host (milestone / regression guard) -----
 # OBJECT library: compiles objanim.c through the shadow headers. Not linked into an
-# exe yet (it references sibling game TUs); compiling clean is the milestone.
-add_library(game_objanim OBJECT ${CMAKE_CURRENT_SOURCE_DIR}/../../src/main/objanim.c)
+# exe here (it references sibling game TUs); compiling clean is the milestone.
+add_library(game_objanim OBJECT ${GAME_ROOT}/src/main/objanim.c)
 target_include_directories(game_objanim PRIVATE ${GAME_INCLUDES})
 target_compile_definitions(game_objanim PRIVATE ${GAME_DEFS})
 
-# --- Smoketests ------------------------------------------------------------
+# ============================================================================
+#  Smoketests / viewer tools (src/tools)
+# ============================================================================
 add_executable(rhi_smoketest src/tools/rhi_smoketest.c)
 target_include_directories(rhi_smoketest PRIVATE ${RHI_INCLUDE})
 target_link_libraries(rhi_smoketest PRIVATE rhi_common stairfax_platform)
@@ -180,15 +225,6 @@ add_executable(model_view src/tools/model_view.c)
 target_include_directories(model_view PRIVATE ${RHI_INCLUDE})
 target_link_libraries(model_view PRIVATE stairfax_gx stairfax_dvd stairfax_platform)
 
-# --- GX draw path (real GX vertex API + write-gather pipe -> RHI) -----------
-# The game submits geometry by writing to GXWGFifo; this library implements the
-# real GX signatures + a FIFO interpreter. gx_wgpipe.cpp is C++ so the PPCWGPipe
-# write-proxy overloads are in effect (see the ppcwgpipe_struct.h host shadow).
-add_library(stairfax_gxdraw STATIC src/gx_draw.c src/gx_wgpipe.cpp)
-target_include_directories(stairfax_gxdraw PUBLIC ${GAME_INCLUDES})
-target_compile_definitions(stairfax_gxdraw PUBLIC ${GAME_DEFS})
-target_link_libraries(stairfax_gxdraw PUBLIC rhi_common)
-
 # Real map geometry from the ISO -> MapBlockData -> gx_draw.
 add_executable(map_view src/tools/map_view.cpp)
 target_include_directories(map_view PRIVATE ${GAME_INCLUDES})
@@ -200,14 +236,14 @@ target_include_directories(gx_draw_smoketest PRIVATE ${GAME_INCLUDES})
 target_compile_definitions(gx_draw_smoketest PRIVATE ${GAME_DEFS})
 target_link_libraries(gx_draw_smoketest PRIVATE stairfax_gxdraw rhi_common stairfax_platform)
 
-# --- Real game drawing TU: lightmap_draw.c rendering through gx_draw --------
-# lightmap_draw.c is compiled as C++ so its GXWGFifo.* stores hit the write-proxy.
-# /Gy + /OPT:REF let the linker drop the file's heavy unreferenced functions
-# (sceneDraw, objRender, ...) so only lightmapDrawTriangleList + its deps link.
+# Real game drawing TU: lightmap_draw.c rendering through gx_draw. Compiled as C++
+# so its GXWGFifo.* stores hit the write-proxy. /Gy + /OPT:REF let the linker drop
+# the file's heavy unreferenced functions (sceneDraw, objRender, ...) so only
+# lightmapDrawTriangleList + its deps link.
 add_executable(lightmap_smoketest
     src/tools/lightmap_smoketest.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/main/lightmap_draw.c)
-set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/../../src/main/lightmap_draw.c
+    ${GAME_ROOT}/src/main/lightmap_draw.c)
+set_source_files_properties(${GAME_ROOT}/src/main/lightmap_draw.c
     PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "/TP;/Gy;/FImain/dll/ppcwgpipe_struct.h")
 target_include_directories(lightmap_smoketest PRIVATE ${GAME_INCLUDES})
 target_compile_definitions(lightmap_smoketest PRIVATE ${GAME_DEFS})
@@ -220,60 +256,83 @@ if(MSVC)
     target_link_options(lightmap_smoketest PRIVATE /FORCE:UNRESOLVED /OPT:NOREF)
 endif()
 
-# --- Boot the real engine: gameloop_main.c (main/init/gameLoop) --------------
-# Phase 3. Compiles the game's real entry TU + video-init TU against the HAL. Links
-# incrementally: each pass resolves more of init()/gameLoop()'s call surface by adding
-# a real game TU or a host stub. Far from linking yet - built on demand to enumerate
-# and whittle down the unresolved-symbol surface.
+# ============================================================================
+#  game_engine - the real port executable
+# ============================================================================
+# Assembled from four TU groups (see the taxonomy note at the top of this file).
+# Bringing up a new subsystem means: add its real TUs to a GAME_* group, add any
+# new bridge glue to PORT_BRIDGE_SRCS, and DELETE the scaffold it replaces from
+# PORT_SCAFFOLD_SRCS (and its row in docs/SCAFFOLD_MANIFEST.md).
+
+# --- Real game TUs, compiled unmodified (the point of the port) -------------
+set(GAME_CORE_TUS
+    ${GAME_ROOT}/src/main/gameloop_main.c     # main() / init() / gameLoop() entry
+    ${GAME_ROOT}/src/main/pi_videoinit.c      # videoInit / waitNextFrame (frame timing)
+    ${GAME_ROOT}/src/main/object.c            # GameObject spawn / update / render
+    ${GAME_ROOT}/src/main/model.c             # ObjModel load / render
+    ${GAME_ROOT}/src/main/objanim.c           # joint animation decode
+    ${GAME_ROOT}/src/main/objprint_dolphin.c  # object debug print
+    ${GAME_ROOT}/src/main/curves.c            # motion curves
+    ${GAME_ROOT}/src/main/camera.c            # Camera_GetCurrent / view state
+    ${GAME_ROOT}/src/main/voxmaps.c)          # VOXOBJ voxel object maps
+set(GAME_CAMERA_DLLS
+    ${GAME_ROOT}/src/dlls/engine/1_camcontrol/camcontrol.c  # id 1: mode-dispatch
+    ${GAME_ROOT}/src/dlls/engine/66/66.c      # 0x42 Normal (stand + locomotion)
+    ${GAME_ROOT}/src/dlls/engine/67/67.c      # 0x43 StaffAnim
+    ${GAME_ROOT}/src/dlls/engine/68/68.c      # 0x44 Viewfinder
+    ${GAME_ROOT}/src/dlls/engine/69/69.c      # 0x45 Talk
+    ${GAME_ROOT}/src/dlls/engine/72/72.c      # 0x48 Static
+    ${GAME_ROOT}/src/dlls/engine/73/73.c      # 0x49 Combat
+    ${GAME_ROOT}/src/dlls/engine/75/75.c      # 0x4B Climb
+    ${GAME_ROOT}/src/dlls/engine/80/80.c      # 0x50 Crawl
+    ${GAME_ROOT}/src/dlls/engine/82/82.c)     # 0x52 ForceBehind
+set(GAME_PLAYER_DLLS
+    ${GAME_ROOT}/src/dlls/engine/5/5.c            # sky / time-of-day
+    ${GAME_ROOT}/src/dlls/engine/15/15.c          # player physics
+    ${GAME_ROOT}/src/dlls/engine/21/21.c          # curves collision advance
+    ${GAME_ROOT}/src/dlls/objects/195_Player/player.c)  # the playable character
+
+# --- HAL sources compiled directly into the exe (not via a static lib) ------
+set(PORT_HAL_SRCS
+    src/hal/pad_input.c)                       # host controller -> game PAD API
+
+# --- Bridge: permanent port-native integration ------------------------------
+set(PORT_BRIDGE_SRCS
+    src/bridge/game_scene.cpp                  # render from the active game camera + map
+    src/bridge/game_camera_wire.c              # activate camcontrol; PPC->x86 vtable ABI fix
+    src/bridge/game_player.c                   # player DLL harness / tick
+    src/bridge/game_resource.c                 # Resource_Acquire DLL registry
+    src/bridge/game_savestate.c                # gamebits / save buffer
+    src/bridge/game_assetfile.c                # MLDF resident data-file loader + swap
+    src/bridge/game_romlist.c                  # per-map object placements
+    src/bridge/game_mapcells.c                 # terrain cell grid -> block placement
+    src/bridge/game_model_support.c            # modelEngine.c substitute (uncompilable TU)
+    src/bridge/game_model_swap.c               # ModelFileHeader BE->host
+    src/bridge/game_objdef_swap.c              # OBJECTS.bin ObjDef BE->host
+    src/bridge/game_sky.c)                     # sky DLL vertical-slice harness
+
+# --- Scaffold: TEMPORARY stubs (see docs/SCAFFOLD_MANIFEST.md) ---------------
+set(PORT_SCAFFOLD_SRCS
+    src/scaffold/game_boot_shims.c             # host render mode + hw globals
+    src/scaffold/game_boot_gx.c                # boot-path GX no-ops
+    src/scaffold/game_boot_externs.c           # pi_dolphin.c global stand-ins
+    src/scaffold/game_boot_stubs.c             # PPC/PS/flip leaf no-ops
+    src/scaffold/game_object_stubs.c           # object subsystem gaps
+    src/scaffold/game_sky_stubs.c              # sky render (sun/moon/lighting)
+    src/scaffold/game_camera_stubs.c           # camera subsystem gaps
+    src/scaffold/game_camcontrol_stubs.c       # camcontrol cosmetic deps
+    src/scaffold/game_objanim_stubs.c          # objanim gaps
+    src/scaffold/game_objprint_stubs.c         # objprint deps
+    src/scaffold/game_player_stubs.c           # flat-floor collision (-> real track_dolphin.c)
+    src/scaffold/game_engine_stubs.cpp)        # remaining engine leaf deps
+
 add_executable(game_engine EXCLUDE_FROM_ALL
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/main/gameloop_main.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/main/pi_videoinit.c
-    src/game_boot_shims.c
-    src/game_boot_gx.c
-    src/game_boot_externs.c
-    src/game_boot_stubs.c
-    src/pad_input.c
-    src/game_scene.cpp
-    src/game_resource.c
-    src/game_savestate.c
-    src/game_assetfile.c
-    src/game_object_stubs.c
-    src/game_romlist.c
-    src/game_mapcells.c
-    src/game_model_support.c
-    src/game_model_swap.c
-    src/game_objdef_swap.c
-    src/game_sky.c
-    src/game_sky_stubs.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/main/object.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/main/model.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/main/objanim.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/main/objprint_dolphin.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/main/curves.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/main/camera.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/main/voxmaps.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/engine/1_camcontrol/camcontrol.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/engine/66/66.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/engine/67/67.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/engine/68/68.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/engine/69/69.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/engine/72/72.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/engine/73/73.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/engine/75/75.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/engine/80/80.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/engine/82/82.c
-    src/game_camera_stubs.c
-    src/game_camcontrol_stubs.c
-    src/game_camera_wire.c
-    src/game_objanim_stubs.c
-    src/game_objprint_stubs.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/engine/5/5.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/engine/15/15.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/engine/21/21.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dlls/objects/195_Player/player.c
-    src/game_player.c
-    src/game_player_stubs.c
-    src/game_engine_stubs.cpp)
+    ${GAME_CORE_TUS}
+    ${GAME_CAMERA_DLLS}
+    ${GAME_PLAYER_DLLS}
+    ${PORT_HAL_SRCS}
+    ${PORT_BRIDGE_SRCS}
+    ${PORT_SCAFFOLD_SRCS})
 target_include_directories(game_engine PRIVATE ${GAME_INCLUDES})
 target_compile_definitions(game_engine PRIVATE ${GAME_DEFS})
 # mm: the real src/main/mm.c casts (MmGlobalLayout*)gMmStoreArray, reading regions at
@@ -284,30 +343,33 @@ if(MSVC)
     target_link_options(game_engine PRIVATE /LARGEADDRESSAWARE /MAP)
 endif()
 
-# --- Host input state-machine smoketest (no hardware needed) -----------------
+# ============================================================================
+#  Standalone smoketests for individual port modules
+# ============================================================================
+# Host input state-machine smoketest (no hardware needed)
 add_executable(pad_smoketest EXCLUDE_FROM_ALL
     src/tools/pad_smoketest.c
-    src/pad_input.c)
+    src/hal/pad_input.c)
 
-# --- Resource/DLL registry smoketest -----------------------------------------
+# Resource/DLL registry smoketest
 add_executable(resource_smoketest EXCLUDE_FROM_ALL
     src/tools/resource_smoketest.c
-    src/game_resource.c)
+    src/bridge/game_resource.c)
 
-# --- Endianness facility smoketest (port/byteswap.h) -------------------------
+# Endianness facility smoketest (port/byteswap.h)
 add_executable(byteswap_smoketest EXCLUDE_FROM_ALL
     src/tools/byteswap_smoketest.c)
 target_include_directories(byteswap_smoketest PRIVATE ${GAME_INCLUDES})
 
-# --- Boot real game code (pi_videoinit.c) against the HAL --------------------
+# Boot real game code (pi_videoinit.c) against the HAL
 add_executable(game_boot
     src/tools/game_boot.c
-    src/game_boot_shims.c
-    src/game_boot_gx.c
-    src/game_boot_externs.c
-    src/game_boot_stubs.c
-    src/game_boot_draw.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/main/pi_videoinit.c)
+    src/scaffold/game_boot_shims.c
+    src/scaffold/game_boot_gx.c
+    src/scaffold/game_boot_externs.c
+    src/scaffold/game_boot_stubs.c
+    src/scaffold/game_boot_draw.cpp
+    ${GAME_ROOT}/src/main/pi_videoinit.c)
 target_include_directories(game_boot PRIVATE ${GAME_INCLUDES})
 target_compile_definitions(game_boot PRIVATE ${GAME_DEFS})
 target_link_libraries(game_boot PRIVATE stairfax_os stairfax_mm stairfax_vi stairfax_dvd stairfax_gxdraw rhi_common stairfax_platform)
