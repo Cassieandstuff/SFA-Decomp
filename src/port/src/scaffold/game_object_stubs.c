@@ -51,7 +51,7 @@ int Sfx_StopObjectChannel(void) { return 0; }
 int basisVectorsToEulerAngles(void) { return 0; }
 int debugPrintf(void) { return 0; }
 int getCurMapType(void) { return 0; }
-int getCurUiDll(void) { return 0; }
+// getCurUiDll now real in bridge/game_model_support.c (uiDll spine) - stub removed.
 int getTabEntry(void) { return 0; }
 int intersectModLineBuild(void) { return 0; }
 int mapLoadForObject(void) { return 0; }

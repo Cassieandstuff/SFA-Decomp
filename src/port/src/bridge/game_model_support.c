@@ -601,3 +601,120 @@ float    acosf(float x) { return (float)acos((double)x); }  // shadow math_api d
 
 // --- data globals ----------------------------------------------------------
 float gModelRootRotX, gModelRootRotY, gModelRootRotZ, gModelVertexScale;
+
+// --- UI-DLL loader (faithful port of modelEngine.c's front-end DLL spine) ----
+// The title screen / menus / attract mode are "UI DLLs": one is current at a time,
+// Resource_Acquire'd by id from gModelEngineUiDllResourceIds[], run each frame via its
+// UiDllVTable (frameStart/frameEnd/draw). The real loader lives in modelEngine.c, which
+// the port cannot compile, so it is reimplemented here (like the rest of this file).
+// Safe as a spine on its own: curUiDll starts 0 -> id -1 -> nothing loaded -> no vtable
+// calls, until front-end code calls loadUiDll(index) with a registered UI DLL.
+typedef struct UiDllVTable {
+    void* field0;
+    int  (*frameStart)(void);
+    void (*frameEnd)(void);
+    void (*draw)(int arg0, int arg1, int arg2);
+    void (*setState)(int state);
+} UiDllVTable;
+
+extern void* Resource_Acquire(unsigned short id, int unused);
+extern int   Resource_Release(void* handleSlot);
+
+int gModelEnginePrevUiDll;
+int curUiDll;
+int gModelEnginePendingUiDll;
+UiDllVTable** gModelEngineCurUiDllRes;
+int gModelEngineUiDllResourceIds[] = {
+    -1, 16, 50, 51, 52, 53, 54, 55, 56, 57, -1, -1, 58, -1, 63, 64, 65, -1,
+};
+
+void curUiDllDraw(int a, int b, int c, int d) {
+    (void)d;
+    if (gModelEngineCurUiDllRes != NULL) {
+        UiDllVTable* cb = *gModelEngineCurUiDllRes;
+        cb->draw(a, b, c);
+    }
+}
+
+void uiDll_runFrameEndAndLoadNext(void) {
+    int resourceId;
+    if (gModelEngineCurUiDllRes != NULL) {
+        UiDllVTable* cb = *gModelEngineCurUiDllRes;
+        cb->frameEnd();
+    }
+    if (gModelEnginePendingUiDll != 0) {
+        gModelEnginePendingUiDll--;
+        gModelEnginePrevUiDll = curUiDll;
+        if (gModelEngineCurUiDllRes != NULL) {
+            Resource_Release(gModelEngineCurUiDllRes);
+            gModelEngineCurUiDllRes = NULL;
+        }
+        resourceId = gModelEngineUiDllResourceIds[gModelEnginePendingUiDll];
+        if (resourceId != -1) {
+            gModelEngineCurUiDllRes = Resource_Acquire((unsigned short)resourceId, 1);
+        } else {
+            gModelEngineCurUiDllRes = NULL;
+            gModelEnginePendingUiDll = 0;
+        }
+        curUiDll = gModelEnginePendingUiDll;
+        gModelEnginePendingUiDll = 0;
+    }
+}
+
+int uiDll_runFrameStartAndLoadNext(void) {
+    int result = 0;
+    int resourceId;
+    if (gModelEngineCurUiDllRes != NULL) {
+        UiDllVTable* cb = *gModelEngineCurUiDllRes;
+        result = cb->frameStart();
+    }
+    if (gModelEnginePendingUiDll != 0) {
+        gModelEnginePendingUiDll--;
+        gModelEnginePrevUiDll = curUiDll;
+        if (gModelEngineCurUiDllRes != NULL) {
+            Resource_Release(gModelEngineCurUiDllRes);
+            gModelEngineCurUiDllRes = NULL;
+        }
+        resourceId = gModelEngineUiDllResourceIds[gModelEnginePendingUiDll];
+        if (resourceId != -1) {
+            gModelEngineCurUiDllRes = Resource_Acquire((unsigned short)resourceId, 1);
+        } else {
+            gModelEngineCurUiDllRes = NULL;
+            gModelEnginePendingUiDll = 0;
+        }
+        curUiDll = gModelEnginePendingUiDll;
+        gModelEnginePendingUiDll = 0;
+    }
+    return result;
+}
+
+void setCurUiDll(int idx) { curUiDll = idx; }
+int  getPrevUiDll(void) { return gModelEnginePrevUiDll; }
+UiDllVTable** getCurUiDllInterface(void) { return gModelEngineCurUiDllRes; }
+int  getCurUiDll(void) { return curUiDll; }
+
+void loadUiDll(int index) {
+    int next, current, resourceId;
+    current = curUiDll;
+    if (index != current) {
+        next = index + 1;
+        gModelEnginePendingUiDll = next;
+        if (gModelEngineCurUiDllRes == NULL && next != 0) {
+            gModelEnginePendingUiDll = next - 1;
+            gModelEnginePrevUiDll = current;
+            if (gModelEngineCurUiDllRes != NULL) {
+                Resource_Release(gModelEngineCurUiDllRes);
+                gModelEngineCurUiDllRes = NULL;
+            }
+            resourceId = gModelEngineUiDllResourceIds[gModelEnginePendingUiDll];
+            if (resourceId != -1) {
+                gModelEngineCurUiDllRes = Resource_Acquire((unsigned short)resourceId, 1);
+            } else {
+                gModelEngineCurUiDllRes = NULL;
+                gModelEnginePendingUiDll = 0;
+            }
+            curUiDll = gModelEnginePendingUiDll;
+            gModelEnginePendingUiDll = 0;
+        }
+    }
+}

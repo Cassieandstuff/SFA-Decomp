@@ -158,7 +158,7 @@ int audioStopAll(){ trace("audioStopAll"); return 0; }
 int audioUpdate(){ trace("audioUpdate"); return 0; }
 int beginLoadingMap(){ trace("beginLoadingMap"); return 0; }
 int clearForceLoadImmediately(){ trace("clearForceLoadImmediately"); return 0; }
-int curUiDllDraw(){ trace("curUiDllDraw"); return 0; }
+// curUiDllDraw now real in bridge/game_model_support.c (uiDll spine) - stub removed.
 int debugPrintDraw(){ trace("debugPrintDraw"); return 0; }
 int debugPrintInit(){ trace("debugPrintInit"); return 0; }
 int debugPrintReset(){ trace("debugPrintReset"); return 0; }
@@ -183,7 +183,7 @@ int loadDataFiles(){ trace("loadDataFiles"); return 0; }
 int loadMapAndParent(){ trace("loadMapAndParent"); return 0; }
 int loadTaskTexts(){ trace("loadTaskTexts"); return 0; }
 int loadTextureFiles(){ trace("loadTextureFiles"); return 0; }
-int loadUiDll(){ trace("loadUiDll"); return 0; }
+// loadUiDll now real in bridge/game_model_support.c (uiDll spine) - stub removed.
 // mainLoopDoGameText now provided by the real text cluster (subtitle.c) - stub removed.
 int mapLoadDataFiles(){ trace("mapLoadDataFiles"); return 0; }
 int mapReloadWithFadeout(){ trace("mapReloadWithFadeout"); return 0; }
@@ -202,8 +202,7 @@ int taskHintRecordCompletedTask(){ trace("taskHintRecordCompletedTask"); return 
 int trackInitCollisionBuffers(){ trace("trackInitCollisionBuffers"); return 0; }
 int trackIntersect(){ trace("trackIntersect"); return 0; }
 int tvInit(){ trace("tvInit"); return 0; }
-int uiDll_runFrameEndAndLoadNext(){ trace("uiDll_runFrameEndAndLoadNext"); return 0; }
-int uiDll_runFrameStartAndLoadNext(){ trace("uiDll_runFrameStartAndLoadNext"); return 0; }
+// uiDll_runFrameEnd/StartAndLoadNext now real in bridge/game_model_support.c - stubs removed.
 int unloadMap(){ trace("unloadMap"); return 0; }
 int updateEnvironment(){ trace("updateEnvironment"); return 0; }
 int waterFxInit(){ trace("waterFxInit"); return 0; }
