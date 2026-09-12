@@ -81,7 +81,7 @@ void GXSetTevIndirect(void) {}
 void GXSetIndTexMtx(void) {}
 void GXSetIndTexCoordScale(void) {}
 void GXSetIndTexOrder(void) {}
-void _gxSetFogParams(void) {}
+// _gxSetFogParams now real in intersect_render.c - removed.
 
 // --- Rcp / TEV stage builders (rcp_dolphin.c / shader_dolphin.c): no-op -------
 void Rcp_ResetTextureStageState(void) {}
@@ -121,7 +121,7 @@ void addRenderOpFadeStage(void) {}
 void AttractMovie_AddVideoTevStages(void) {}
 int  isHeavyFogEnabled(void) { return 0; }
 void renderHeavyFog(void) {}
-void getFogColorRgb(void) {}
+// getFogColorRgb now real in intersect_render.c - removed.
 
 // --- model light channels (modellight.c): no-op (default flat lighting) -------
 void lightGetColor(void) {}
@@ -142,4 +142,4 @@ void* newshadows_getNoiseTextureFrames(void) { return gDummy; }
 void* newshadows_getShadowTextureTable4x8(void) { return gDummy; }
 void  getObjectShadowDrawParams(void) {}
 int   depthReadRequestPoll(void) { return 0; }
-void  hudDrawColored(void) {}
+// hudDrawColored now real in intersect_render.c - removed.

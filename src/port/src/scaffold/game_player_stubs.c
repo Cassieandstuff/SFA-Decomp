@@ -86,10 +86,8 @@ int getCurSeqNo(void) { return 0; }
 int getFocusedNpc(void) { return 0; }
 int getSbGalleon(void) { return 0; }
 int getYButtonItem(void) { return 0; }
-int gxSetOpaqueZWriteMode(void) { return 0; }
-int gxTevCommitStages(void) { return 0; }
-int gxTevResetStages(void) { return 0; }
-int gxTevTextureTimesColor1Stage(void) { return 0; }
+// gxSetOpaqueZWriteMode/gxTevCommitStages/gxTevResetStages/gxTevTextureTimesColor1Stage
+// now provided real by intersect_render.c (text/2D render bring-up) - stubs removed.
 int hudSetMagicCostPreview(void) { return 0; }
 // FLOAT-returning functions stubbed as int return garbage in the FP register (xmm0), not 0 - the
 // caller reads that garbage as a float, so e.g. `animSpeedA *= powfBitEstimate(...)` -> NaN position.
@@ -196,7 +194,7 @@ void trackInvalidateDynamicSlotsForObject(void* target) { (void)target; }
 void ObjHits_AddContactObject(void* obj, void* contactObj) { (void)obj; (void)contactObj; }
 // Link-only settings sinks reached from engine/21's loadSaveSettings (not on the player path).
 int setWidescreen(void) { return 0; }
-int setSubtitlesEnabled(void) { return 0; }
+// setSubtitlesEnabled now provided by the real text cluster (subtitle.c) - stub removed.
 int audioSetSoundMode(void) { return 0; }
 int audioSetVolumes(void) { return 0; }
 int trickyImpress(void) { return 0; }

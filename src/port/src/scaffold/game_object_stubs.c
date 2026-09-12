@@ -65,7 +65,7 @@ int mtx44Transpose(void) { return 0; }
 int mtxRotateByVec3s(void) { return 0; }
 int newshadows_getSmallDiskTexture(void) { return 0; }
 int objAddObjectType(void) { return 0; }
-int objCausticReflectionRenderCb(void) { return 0; }
+// objCausticReflectionRenderCb now real in intersect_render.c - removed.
 int objFreeObjectType(void) { return 0; }
 // out-param: must zero *count (Obj_GetPlayerObject reads it before indexing).
 void* objGetAllOfType(int type, int* count) { (void)type; if (count) *count = 0; return 0; }
@@ -74,8 +74,7 @@ int objListAdd(void) { return 0; }
 int objListInit(void) { return 0; }
 int objList_remove(void) { return 0; }
 // objLoadPlayerFromSave now provided by the real player DLL (player.c) - stub removed (Phase A).
-int objModelNormalDiskRenderCb(void) { return 0; }
-int objModelProjectedIndirectRenderCb(void) { return 0; }
+// objModelNormalDiskRenderCb/objModelProjectedIndirectRenderCb now real in intersect_render.c - removed.
 int objTypeInit(void) { return 0; }
 // playerDoHitDetection/playerFree/playerUpdate/playerUpdateWhileTimeStopped are now provided
 // by the real player DLL (src/dlls/objects/195_Player/player.c); stubs removed (Phase A).

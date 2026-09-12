@@ -592,7 +592,7 @@ void  shaderInit(unsigned char* def, void* textures, void* obj, int shaderFlags)
     else if (layerCount)   texRefs[0] = gShaderTexSentinel;
     if (reg2)              texRefs[1] = reg2;
 }
-void  objFrozenRenderCb(void) { }
+// objFrozenRenderCb now real in intersect_render.c (text/2D render bring-up) - removed.
 
 // --- misc ------------------------------------------------------------------
 void     GXSetAlphaCompare(void) { }

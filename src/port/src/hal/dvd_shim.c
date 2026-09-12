@@ -397,3 +397,14 @@ int32_t fileGetSize(int id) {
     DVDClose(&info);
     return len;
 }
+
+// NOTE: loadFileByPathAsync lives in bridge/game_assetfile.c, not here: the game
+// mm_free's the buffer it returns, so it must be mmAlloc'd, and this HAL lib does not
+// (and must not) link the mm shim.
+
+int32_t DVDCancelAsync(DVDCommandBlock* block, void* callback) {
+    (void)block; (void)callback;  // sync IO: nothing in flight to cancel
+    return 1;
+}
+
+void setFileInfo(DVDFileInfo* fileInfo) { (void)fileInfo; }

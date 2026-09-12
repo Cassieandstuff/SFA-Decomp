@@ -67,13 +67,13 @@ int PSVECScale(void) { return 0; }
 int blendTextures(void) { return 0; }
 int colorScale(void) { return 0; }
 int coordsToMapCell(void) { return 0; }
-int drawOrthoTexturedQuad(void) { return 0; }
+// drawOrthoTexturedQuad now real in intersect_render.c - removed.
 int getEnvfxAct(void) { return 0; }
 int getEnvfxActImmediately(void) { return 0; }
 int getLoadedFileFlags(void) { return 0; }
 int getSaveGameLoadStatus(void) { return 0; }
 int getScreenResolution(void) { return 0; }
-int gxSetOpaqueNoZWriteMode(void) { return 0; }
+// gxSetOpaqueNoZWriteMode now real in intersect_render.c - removed.
 int lightSetColor(void) { return 0; }
 // mathCosf(radians): the game's cosine (arg in radians). Was an int return-0 stub - float-returning
 // stubbed as int -> garbage xmm0 -> the player's heading (velocityX/Z from mathCosf(yaw)) went NaN.
@@ -85,7 +85,7 @@ int modelLightStruct_setDiffuseColor(void) { return 0; }
 int modelLightStruct_setDirection(void) { return 0; }
 int modelLightStruct_setLightKind(void) { return 0; }
 int modelLightStruct_setSpecularColor(void) { return 0; }
-int moonFxRenderCallback(void) { return 0; }
+// moonFxRenderCallback now real in intersect_render.c - removed.
 int objCreateLight(void) { return 0; }
 int objRender(void) { return 0; }
 int shadowSetLightDirection(void) { return 0; }

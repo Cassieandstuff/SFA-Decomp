@@ -185,6 +185,31 @@ add_library(game_objanim OBJECT ${GAME_ROOT}/src/main/objanim.c)
 target_include_directories(game_objanim PRIVATE ${GAME_INCLUDES})
 target_compile_definitions(game_objanim PRIVATE ${GAME_DEFS})
 
+# --- Real text subsystem TUs (gametext + textrender cluster) ----------------
+# The real gameText path, wired into game_engine below (replacing the text no-ops
+# in scaffold/game_engine_stubs.cpp). All compile clean against the shadow headers.
+# See the text bring-up plan in memory (port-text).
+set(GAME_TEXT_TUS
+    ${GAME_ROOT}/src/main/textrender.c
+    ${GAME_ROOT}/src/main/textrender_run.c
+    ${GAME_ROOT}/src/main/textrender_boxtex.c
+    ${GAME_ROOT}/src/main/textrender_drawbox.c
+    ${GAME_ROOT}/src/main/textrender_gettext.c
+    ${GAME_ROOT}/src/main/gametext.c
+    ${GAME_ROOT}/src/main/gametext_measurebyid.c
+    ${GAME_ROOT}/src/main/gametext_tail.c
+    ${GAME_ROOT}/src/main/subtitle.c)
+# The text/2D DRAW primitives (textRenderChar/Setup, drawTexture/ScaledTexture,
+# hudDrawRect) live in src/track/intersect_render.c. It submits 2D geometry by storing
+# directly into GXWGFifo (the write-gather pipe) 434 times - as C those stores hit the
+# raw hardware address 0xCC008000 and crash at runtime. It CANNOT be compiled as C++ (the
+# C++ write-proxy path) because the TU has ~100 C-isms (implicit void*->T* and int->enum)
+# that C++ rejects, and we compile decomp TUs unmodified. Resolving this needs a WGPIPE
+# MMIO trap (a VEH that intercepts stores to 0xCC008000). Until then it links but crashes
+# once text render runs. See port-text memory note.
+set(GAME_TEXT_DRAW_TUS
+    ${GAME_ROOT}/src/track/intersect_render.c)
+
 # ============================================================================
 #  Smoketests / viewer tools (src/tools)
 # ============================================================================
@@ -294,7 +319,8 @@ set(GAME_PLAYER_DLLS
 
 # --- HAL sources compiled directly into the exe (not via a static lib) ------
 set(PORT_HAL_SRCS
-    src/hal/pad_input.c)                       # host controller -> game PAD API
+    src/hal/pad_input.c                        # host controller -> game PAD API
+    src/hal/wgpipe_trap.c)                      # WGPIPE MMIO trap (auto-arms at CRT init)
 
 # --- Bridge: permanent port-native integration ------------------------------
 set(PORT_BRIDGE_SRCS
@@ -324,12 +350,15 @@ set(PORT_SCAFFOLD_SRCS
     src/scaffold/game_objanim_stubs.c          # objanim gaps
     src/scaffold/game_objprint_stubs.c         # objprint deps
     src/scaffold/game_player_stubs.c           # flat-floor collision (-> real track_dolphin.c)
+    src/scaffold/game_effects_stubs.c          # intersect_render.c effects tail (fog/reflections/newshadows)
     src/scaffold/game_engine_stubs.cpp)        # remaining engine leaf deps
 
 add_executable(game_engine EXCLUDE_FROM_ALL
     ${GAME_CORE_TUS}
     ${GAME_CAMERA_DLLS}
     ${GAME_PLAYER_DLLS}
+    ${GAME_TEXT_TUS}
+    ${GAME_TEXT_DRAW_TUS}
     ${PORT_HAL_SRCS}
     ${PORT_BRIDGE_SRCS}
     ${PORT_SCAFFOLD_SRCS})
@@ -341,6 +370,10 @@ target_compile_definitions(game_engine PRIVATE ${GAME_DEFS})
 target_link_libraries(game_engine PRIVATE stairfax_os stairfax_mm stairfax_vi stairfax_dvd stairfax_assets stairfax_gxdraw rhi_common stairfax_platform)
 if(MSVC)
     target_link_options(game_engine PRIVATE /LARGEADDRESSAWARE /MAP)
+    # intersect_render.c (and other game TUs) call sprintf via the game's printf.h - a
+    # bare decl with no <stdio.h>, so the modern UCRT inline never fires. Link the legacy
+    # definition object that exports the real sprintf/vsprintf symbols.
+    target_link_libraries(game_engine PRIVATE legacy_stdio_definitions)
 endif()
 
 # ============================================================================

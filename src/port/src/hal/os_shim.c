@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -189,3 +190,34 @@ void OSCreateAlarm(OSAlarm* a) { (void)a; }
 void OSSetAlarm(OSAlarm* a, OSTime t, OSAlarmHandler h) { (void)a; (void)t; (void)h; }
 void OSSetPeriodicAlarm(OSAlarm* a, OSTime s, OSTime p, OSAlarmHandler h) { (void)a; (void)s; (void)p; (void)h; }
 void OSCancelAlarm(OSAlarm* a) { (void)a; }
+
+// --- font (IPL ROM system font) --------------------------------------------
+// The GameCube supplies this font from IPL ROM; the port has no ROM, and SFA uses it
+// only for the fallback GAMETEXT_SLOT_ERROR charset (real text = disc font). ANSI
+// encoding, empty load. Give real impls if the error charset is ever needed on screen.
+u16 OSGetFontEncode(void) { return OS_FONT_ENCODE_ANSI; }
+u32 OSLoadFont(OSFontHeader* fontData, void* tmp) {
+    (void)tmp;
+    if (fontData) memset(fontData, 0, sizeof(OSFontHeader));
+    return 0;
+}
+char* OSGetFontTexel(const char* string, void* image, s32 pos, s32 stride, s32* width) {
+    (void)string; (void)image; (void)pos; (void)stride;
+    if (width) *width = 0;
+    return 0;
+}
+char* OSGetFontWidth(const char* string, s32* width) {
+    (void)string;
+    if (width) *width = 0;
+    return 0;
+}
+
+// --- math helpers used by intersect_render.c (real impls; float returns must be exact
+// or callers NaN). __frsqrte is the PPC reciprocal-sqrt estimate; atanf_fast/mathSinCosf
+// are game math helpers whose real TUs aren't compiled yet. ---
+double __frsqrte(double x) { return x > 0.0 ? 1.0 / sqrt(x) : 0.0; }
+float atanf_fast(float x) { return atanf(x); }
+void mathSinCosf(float angle, float* sinOut, float* cosOut) {
+    if (sinOut) *sinOut = sinf(angle);
+    if (cosOut) *cosOut = cosf(angle);
+}

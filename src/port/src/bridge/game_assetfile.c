@@ -12,6 +12,7 @@
 
 #include "port/dvd_shim.h"
 #include "port/byteswap.h"
+#include "main/mm.h"     // mmAlloc - loaded buffers the game later mm_free's must be mm-owned
 
 #include <stdint.h>
 #include <stdio.h>
@@ -66,4 +67,26 @@ void loadAssetFileById(void* out, int fileId) {
 
 int getDataFileSize(int idx) {
     return (idx >= 0 && idx < MLDF_MAX_ID) ? gSize[idx] : 0;
+}
+
+// The game's by-path async loader, adapted to synchronous host IO. Callers read *outSize
+// immediately after the call and later mm_free the returned buffer, so the buffer MUST be
+// mm-owned (a plain malloc corrupts the mm heap on free - that was the text-load crash).
+// We load the whole file up front, mmAlloc it, fire the callback with a success result,
+// and return it. (Lives here, not in the DVD HAL, because only this layer links mm.)
+void* loadFileByPathAsync(char* path, int* outSize, int prio, DVDCallback callback) {
+    (void)prio;
+    DVDFileInfo info;
+    if (!DVDOpen(path, &info)) {
+        if (outSize) *outSize = 0;
+        if (callback) callback(-1, 0);
+        return 0;
+    }
+    int len = info.length;
+    void* buf = mmAlloc(len > 0 ? len : 1, 0xE, 0);
+    if (buf && len > 0) DVDRead(&info, buf, len, 0);
+    if (outSize) *outSize = len;
+    if (callback) callback(len, &info);
+    DVDClose(&info);
+    return buf;
 }

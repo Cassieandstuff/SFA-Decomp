@@ -36,8 +36,8 @@ void C_MTXOrtho(void* mm, float t, float b, float l, float r, float n, float f) 
 
 // --- camera / PE helpers (GP state; no-op on host) -------------------------
 // Camera_ApplyFullViewport is now the real camera.c version.
-void gxSetPeControl_ZCompLoc_(unsigned char z)          { (void)z; }
-void gxSetZMode_(unsigned char e, int func, unsigned char u) { (void)e; (void)func; (void)u; }
+// gxSetPeControl_ZCompLoc_/gxSetZMode_ now provided real by intersect_render.c in
+// game_engine (text/2D render bring-up) - stubs removed. Not referenced by game_boot.
 
 // --- retrace swap callback (VI shim already presents the frame) ------------
 void videoSwapFrameBuffers(unsigned int retraceCount)   { (void)retraceCount; }

@@ -166,14 +166,11 @@ int doNothing_beforeTitleScreen(){ trace("doNothing_beforeTitleScreen"); return 
 int doNothing_endOfFrame(){ trace("doNothing_endOfFrame"); return 0; }
 int doNothing_startOfFrame(){ trace("doNothing_startOfFrame"); return 0; }
 int doPendingMapLoads(){ trace("doPendingMapLoads"); return 0; }
-int drawRect(){ trace("drawRect"); return 0; }
+// drawRect now real in intersect_render.c - removed.
 int dvdCheckError(){ trace("dvdCheckError"); return 0; }
 int errDisplayInstallHandlers(){ trace("errDisplayInstallHandlers"); return 0; }
-int gameTextInit(){ trace("gameTextInit"); return 0; }
-int gameTextInitRendererState(){ trace("gameTextInitRendererState"); return 0; }
-int gameTextLoadDir(){ trace("gameTextLoadDir"); return 0; }
-int gameTextRun(){ trace("gameTextRun"); return 0; }
-int gameTextSetDrawFunc(){ trace("gameTextSetDrawFunc"); return 0; }
+// gameTextInit/InitRendererState/LoadDir/Run/SetDrawFunc now provided by the real
+// text cluster (textrender_run.c) - stubs removed (text subsystem bring-up).
 int initGameTimer(){ trace("initGameTimer"); return 0; }
 int initLoadFiles(){ trace("initLoadFiles"); return 1; }
 int initLoadingScreenTextures(){ trace("initLoadingScreenTextures"); return 0; }
@@ -187,7 +184,7 @@ int loadMapAndParent(){ trace("loadMapAndParent"); return 0; }
 int loadTaskTexts(){ trace("loadTaskTexts"); return 0; }
 int loadTextureFiles(){ trace("loadTextureFiles"); return 0; }
 int loadUiDll(){ trace("loadUiDll"); return 0; }
-int mainLoopDoGameText(){ trace("mainLoopDoGameText"); return 0; }
+// mainLoopDoGameText now provided by the real text cluster (subtitle.c) - stub removed.
 int mapLoadDataFiles(){ trace("mapLoadDataFiles"); return 0; }
 int mapReloadWithFadeout(){ trace("mapReloadWithFadeout"); return 0; }
 int mapSetup(){ trace("mapSetup"); return 0; }
@@ -196,12 +193,11 @@ int mapUpdateCameraPosByTransformSpace(){ trace("mapUpdateCameraPosByTransformSp
 int newshadows_initProceduralTextures(){ trace("newshadows_initProceduralTextures"); return 0; }
 int objRenderModelAndHitVolumes(){ trace("objRenderModelAndHitVolumes"); return 0; }
 // playerInitFuncPtrsEntry now provided by the real player DLL (player.c) - stub removed (Phase A).
-int resetSomeGxFlags(){ trace("resetSomeGxFlags"); return 0; }
+// resetSomeGxFlags now real in intersect_render.c - removed.
 int runLoadingScreens(){ trace("runLoadingScreens"); return 0; }
 int setDrawCloudsAndLights(){ trace("setDrawCloudsAndLights"); return 0; }
 int setForceLoadImmediately(){ trace("setForceLoadImmediately"); return 0; }
-int subtitleInit(){ trace("subtitleInit"); return 0; }
-int subtitleUpdateAndDraw(){ trace("subtitleUpdateAndDraw"); return 0; }
+// subtitleInit/subtitleUpdateAndDraw now provided by the real text cluster (subtitle.c) - stubs removed.
 int taskHintRecordCompletedTask(){ trace("taskHintRecordCompletedTask"); return 0; }
 int trackInitCollisionBuffers(){ trace("trackInitCollisionBuffers"); return 0; }
 int trackIntersect(){ trace("trackIntersect"); return 0; }

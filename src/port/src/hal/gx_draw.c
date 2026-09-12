@@ -447,3 +447,23 @@ void GXBegin(GXPrimitive type, GXVtxFmt vtxfmt, u16 nverts) {
 static void fifoMaybeFlush(void) {
     if (gCollecting && gFifoLen >= gExpectBytes) { gCollecting = 0; decodeAndDraw(); }
 }
+
+// --- GX render-state + texture-object API used by intersect_render.c's 2D/text draw.
+// Loose enum types (int/u8) match by symbol name (the GX enums are int-sized), as in
+// gx_shim.c. Minimal bodies to link + a sane scissor; wire Z/TEV/texture state into the
+// RHI when text-render CORRECTNESS is tackled (GXInitTexObj especially, for glyph textures).
+void GXGetScissor(u32* left, u32* top, u32* wd, u32* ht) {
+    if (left) *left = 0; if (top) *top = 0; if (wd) *wd = 640; if (ht) *ht = 480;
+}
+void GXSetZMode(u8 compare_enable, int func, u8 update_enable) {
+    (void)compare_enable; (void)func; (void)update_enable;
+}
+void GXSetZCompLoc(u8 before_tex) { (void)before_tex; }
+void GXSetTevSwapModeTable(int table, int r, int g, int b, int a) {
+    (void)table; (void)r; (void)g; (void)b; (void)a;
+}
+void GXInitTexObj(void* obj, void* image, u16 width, u16 height, int fmt,
+                  int wrap_s, int wrap_t, u8 mipmap) {
+    (void)obj; (void)image; (void)width; (void)height;
+    (void)fmt; (void)wrap_s; (void)wrap_t; (void)mipmap;
+}
